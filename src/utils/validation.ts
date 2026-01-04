@@ -1,7 +1,7 @@
-import { env } from '../config/env';
+import { env } from '../config/env.js';
 
 const MAX_MESSAGE_LENGTH = parseInt(process.env.MAX_MESSAGE_LENGTH || '10000', 10);
-const MAX_MESSAGE_WITH_DATA_URL = 50 * 1024 * 1024; // 50MB for data URLs (base64 encoded files)
+const MAX_MESSAGE_WITH_DATA_URL = 15 * 1024 * 1024; // 15MB for data URLs (base64 encoded files) - allows ~10MB files after base64 encoding
 
 // Allowed MIME types for file uploads
 const ALLOWED_MIME_TYPES = [
@@ -17,8 +17,12 @@ const ALLOWED_MIME_TYPES = [
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'text/plain',
   'text/csv',
+  'text/xml',
+  'application/xml',
   // Archives
   'application/zip',
   'application/x-zip-compressed',
@@ -71,11 +75,47 @@ export const validateFileSize = (fileSize: number): { valid: boolean; error?: st
   return { valid: true };
 };
 
-export const validateMimeType = (mimeType: string): { valid: boolean; error?: string } => {
+/**
+ * Infer MIME type from file extension
+ */
+const inferMimeTypeFromExtension = (fileName: string): string | null => {
+  const ext = fileName.toLowerCase().split('.').pop();
+  if (!ext) return null;
+  
+  const mimeMap: Record<string, string> = {
+    // Images
+    'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+    'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
+    // Documents
+    'pdf': 'application/pdf', 'doc': 'application/msword',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls': 'application/vnd.ms-excel',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'ppt': 'application/vnd.ms-powerpoint',
+    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'txt': 'text/plain', 'csv': 'text/csv', 'xml': 'text/xml',
+    // Archives
+    'zip': 'application/zip', 'rar': 'application/x-rar-compressed',
+    // Audio/Video
+    'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'mp4': 'video/mp4', 'webm': 'video/webm',
+  };
+  return mimeMap[ext] || null;
+};
+
+export const validateMimeType = (mimeType: string, fileName?: string): { valid: boolean; error?: string; inferredMimeType?: string } => {
+  // If MIME type is empty or the generic fallback, try to infer from filename
+  if ((!mimeType || mimeType === 'application/octet-stream') && fileName) {
+    const inferred = inferMimeTypeFromExtension(fileName);
+    if (inferred && ALLOWED_MIME_TYPES.includes(inferred)) {
+      return { valid: true, inferredMimeType: inferred };
+    }
+  }
+  
+  // Validate provided MIME type
   if (!mimeType || !ALLOWED_MIME_TYPES.includes(mimeType)) {
     return {
       valid: false,
-      error: `File type ${mimeType} is not allowed. Allowed types: images, documents, archives, audio/video.`,
+      error: `File type ${mimeType || 'unknown'} is not allowed. Allowed types: images, documents, archives, audio/video.`,
     };
   }
   return { valid: true };
@@ -115,13 +155,13 @@ export const validateFileUpload = (
   fileName: string,
   mimeType: string,
   fileSize: number
-): { valid: boolean; error?: string; sanitizedFileName?: string } => {
+): { valid: boolean; error?: string; sanitizedFileName?: string; inferredMimeType?: string } => {
   const sizeValidation = validateFileSize(fileSize);
   if (!sizeValidation.valid) {
     return sizeValidation;
   }
 
-  const mimeValidation = validateMimeType(mimeType);
+  const mimeValidation = validateMimeType(mimeType, fileName);
   if (!mimeValidation.valid) {
     return mimeValidation;
   }
@@ -137,5 +177,6 @@ export const validateFileUpload = (
   return {
     valid: true,
     sanitizedFileName,
+    inferredMimeType: mimeValidation.inferredMimeType,
   };
 };

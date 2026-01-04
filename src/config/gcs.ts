@@ -1,6 +1,6 @@
 import { Storage } from '@google-cloud/storage';
-import { logger } from '../utils/logger';
-import { env } from './env';
+import { logger } from '../utils/logger.js';
+import { env } from './env.js';
 
 let storageClient: Storage | null = null;
 
@@ -20,8 +20,8 @@ export const getStorageClient = (): Storage | null => {
         },
       });
       logger.info('GCS client initialized');
-    } catch (error) {
-      logger.error('GCS initialization error', { error });
+    } catch (error: any) {
+      logger.error('GCS initialization error', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }

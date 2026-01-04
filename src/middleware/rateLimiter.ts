@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { getRedisClient, isRedisAvailable } from '../config/redis';
-import { logger } from '../utils/logger';
+import { getRedisClient, isRedisAvailable } from '../config/redis.js';
+import { logger } from '../utils/logger.js';
 
 interface RateLimitConfig {
   windowMs: number;
@@ -21,6 +21,18 @@ const RATE_LIMITS: Record<string, RateLimitConfig> = {
     windowMs: 60 * 1000, // 1 minute
     maxRequests: 20, // 20 upload URLs per minute
   },
+  adminDashboard: {
+    windowMs: 60 * 1000, // 1 minute
+    maxRequests: 30, // 30 dashboard requests per minute
+  },
+  adminInsight: {
+    windowMs: 10 * 1000, // 10 seconds
+    maxRequests: 10, // 10 insight requests per 10 seconds
+  },
+  adminAction: {
+    windowMs: 60 * 1000, // 1 minute
+    maxRequests: 10, // 10 action requests per minute
+  },
   default: {
     windowMs: 60 * 1000, // 1 minute
     maxRequests: 10, // 10 requests per minute
@@ -38,8 +50,12 @@ export const rateLimiter = (type: string = 'default') => {
       return;
     }
     
-    // Generate key based on IP and endpoint type
-    const key = `rate_limit:${type}:${req.ip}`;
+    // For admin routes, use admin ID if available, otherwise IP
+    const adminId = (req as any).adminId;
+    const identifier = adminId || req.ip || 'unknown';
+    
+    // Generate key based on identifier and endpoint type
+    const key = `rate_limit:${type}:${identifier}`;
 
     try {
       const count = await redis.incr(key);
@@ -61,8 +77,8 @@ export const rateLimiter = (type: string = 'default') => {
       res.setHeader('X-RateLimit-Reset', new Date(Date.now() + config.windowMs).toISOString());
 
       next();
-    } catch (error) {
-      logger.error('Rate limiter error', { error });
+    } catch (error: any) {
+      logger.error('Rate limiter error', { error: error instanceof Error ? error.message : String(error) });
       // Fail open - allow request if Redis is down
       next();
     }
@@ -92,8 +108,8 @@ export const socketRateLimiter = async (
     }
 
     return count <= maxRequests;
-  } catch (error) {
-    logger.error('Socket rate limiter error', { error });
+  } catch (error: any) {
+    logger.error('Socket rate limiter error', { error: error instanceof Error ? error.message : String(error) });
     return true; // Fail open
   }
 };

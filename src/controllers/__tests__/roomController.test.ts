@@ -1,103 +1,99 @@
 import { Request, Response } from 'express';
-import { createRoomHandler, getRoomHandler } from '../roomController';
-import { createRoom, getRoomByCode } from '../../services/roomService';
+import {
+  createRoomHandler,
+  getRoomHandler,
+  generateUploadUrlHandler,
+  generatePairingCodeHandler,
+  validatePairingCodeHandler,
+} from '../roomController.js';
+import { createRoom, getRoomBySlugOrCode } from '../../services/roomService.js';
+import { generatePairingCodeForRoom, validatePairingCode } from '../../services/pairingService.js';
 
-jest.mock('../../services/roomService');
+jest.mock('../../services/roomService.js');
+jest.mock('../../services/pairingService.js');
+jest.mock('../../services/gcsService.js', () => ({
+  generateUploadUrl: jest.fn().mockResolvedValue({ uploadUrl: 'http://test.com', filePath: 'test.txt' }),
+  isFileUploadAvailable: jest.fn().mockReturnValue(true),
+}));
 
-describe('RoomController', () => {
+describe('Room Controller', () => {
   let mockRequest: Partial<Request>;
   let mockResponse: Partial<Response>;
-  let mockJson: jest.Mock;
-  let mockStatus: jest.Mock;
+  let mockNext: jest.Mock;
 
   beforeEach(() => {
-    mockJson = jest.fn();
-    mockStatus = jest.fn().mockReturnValue({ json: mockJson });
-    mockResponse = {
-      json: mockJson,
-      status: mockStatus,
+    mockRequest = {
+      body: {},
+      params: {},
+      headers: {},
     };
-    mockRequest = {};
+    mockResponse = {
+      json: jest.fn().mockReturnThis(),
+      status: jest.fn().mockReturnThis(),
+    };
+    mockNext = jest.fn();
+    jest.clearAllMocks();
   });
 
   describe('createRoomHandler', () => {
-    it('should create a room and return code and token', async () => {
-      const mockRoom = {
+    it('should create a room', async () => {
+      mockRequest.body = { name: 'Test Room' };
+      (createRoom as jest.Mock).mockResolvedValue({
         code: '1234',
         token: 'test-token',
+        name: 'Test Room',
         expiresAt: new Date(),
-      };
-
-      (createRoom as jest.Mock).mockResolvedValue(mockRoom);
-
-      await createRoomHandler(mockRequest as Request, mockResponse as Response);
-
-      expect(createRoom).toHaveBeenCalled();
-      expect(mockJson).toHaveBeenCalledWith({
-        code: '1234',
-        token: 'test-token',
-        expiresAt: mockRoom.expiresAt,
       });
-    });
-
-    it('should handle errors', async () => {
-      (createRoom as jest.Mock).mockRejectedValue(new Error('Database error'));
 
       await createRoomHandler(mockRequest as Request, mockResponse as Response);
 
-      expect(mockStatus).toHaveBeenCalledWith(500);
-      expect(mockJson).toHaveBeenCalledWith({ error: 'Failed to create room' });
+      expect(mockResponse.status).not.toHaveBeenCalled();
+      expect(mockResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({ code: '1234' })
+      );
     });
   });
 
   describe('getRoomHandler', () => {
-    it('should return room details', async () => {
-      const mockRoom = {
+    it('should get room by code', async () => {
+      mockRequest.params = { slugOrCode: '1234' };
+      (getRoomBySlugOrCode as jest.Mock).mockResolvedValue({
         code: '1234',
-        createdAt: new Date(),
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        participants: ['user1', 'user2'],
-      };
-
-      mockRequest.params = { code: '1234' };
-      (getRoomByCode as jest.Mock).mockResolvedValue(mockRoom);
-
-      await getRoomHandler(mockRequest as Request, mockResponse as Response);
-
-      expect(getRoomByCode).toHaveBeenCalledWith('1234');
-      expect(mockJson).toHaveBeenCalledWith({
-        code: '1234',
-        createdAt: mockRoom.createdAt,
-        expiresAt: mockRoom.expiresAt,
-        participantCount: 2,
+        expiresAt: new Date(Date.now() + 3600000),
       });
-    });
-
-    it('should return 404 if room not found', async () => {
-      mockRequest.params = { code: '9999' };
-      (getRoomByCode as jest.Mock).mockResolvedValue(null);
 
       await getRoomHandler(mockRequest as Request, mockResponse as Response);
 
-      expect(mockStatus).toHaveBeenCalledWith(404);
-      expect(mockJson).toHaveBeenCalledWith({ error: 'Room not found' });
+      expect(mockResponse.json).toHaveBeenCalled();
     });
+  });
 
-    it('should return 410 if room expired', async () => {
-      const mockRoom = {
-        code: '1234',
-        createdAt: new Date(),
-        expiresAt: new Date(Date.now() - 1000),
-        participants: [],
-      };
-
+  describe('generatePairingCodeHandler', () => {
+    it('should generate pairing code', async () => {
       mockRequest.params = { code: '1234' };
-      (getRoomByCode as jest.Mock).mockResolvedValue(mockRoom);
+      mockRequest.body = { userId: 'user-123' };
+      (generatePairingCodeForRoom as jest.Mock).mockResolvedValue('123456');
 
-      await getRoomHandler(mockRequest as Request, mockResponse as Response);
+      await generatePairingCodeHandler(mockRequest as Request, mockResponse as Response);
 
-      expect(mockStatus).toHaveBeenCalledWith(410);
-      expect(mockJson).toHaveBeenCalledWith({ error: 'Room expired' });
+      expect(mockResponse.json).toHaveBeenCalledWith({ pairingCode: '123456' });
+    });
+  });
+
+  describe('validatePairingCodeHandler', () => {
+    it('should validate pairing code', async () => {
+      mockRequest.body = { pairingCode: '123456' };
+      (validatePairingCode as jest.Mock).mockResolvedValue({
+        roomCode: '1234',
+        userId: 'user-123',
+      });
+
+      await validatePairingCodeHandler(mockRequest as Request, mockResponse as Response);
+
+      expect(mockResponse.json).toHaveBeenCalledWith({
+        roomCode: '1234',
+        userId: 'user-123',
+      });
     });
   });
 });

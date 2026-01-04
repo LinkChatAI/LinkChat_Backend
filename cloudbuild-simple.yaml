@@ -8,7 +8,7 @@ steps:
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/linkchat-backend:$SHORT_SHA'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
       - '-t'
       - 'gcr.io/$PROJECT_ID/linkchat-backend:latest'
       - '.'
@@ -18,7 +18,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/linkchat-backend:$SHORT_SHA'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
 
   - name: 'gcr.io/cloud-builders/docker'
     args:
@@ -35,7 +35,7 @@ steps:
       - 'deploy'
       - 'linkchat-backend'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/linkchat-backend:$SHORT_SHA'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
       - '--region'
       - 'us-central1'
       - '--platform'
@@ -55,9 +55,10 @@ steps:
       - '300'
       - '--set-env-vars'
       - 'PORT=8080,NODE_ENV=production'
+      - '--no-cpu-throttling'
 
 images:
-  - 'gcr.io/$PROJECT_ID/linkchat-backend:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
   - 'gcr.io/$PROJECT_ID/linkchat-backend:latest'
 
 options:

@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
-import { logger } from '../utils/logger';
+import { logger } from '../utils/logger.js';
 
 export interface ApiError extends Error {
   statusCode?: number;
@@ -26,6 +26,18 @@ export const errorHandler = (
         path: e.path.join('.'),
         message: e.message,
       })),
+    });
+    return;
+  }
+
+  // Handle database connection errors
+  if (err instanceof Error && err.message === 'Database connection not available') {
+    logger.error('Database connection error in request', {
+      path: req.path,
+      method: req.method,
+    });
+    res.status(503).json({
+      error: 'Service temporarily unavailable. Please try again later.',
     });
     return;
   }

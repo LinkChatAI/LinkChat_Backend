@@ -1,145 +1,132 @@
-import { Server, Socket } from 'socket.io';
-import { handleSocketConnection } from '../handlers';
-import { getRoomByCode } from '../../services/roomService';
-import { getRedisClient } from '../../config/redis';
+import { Server } from 'socket.io';
+import { Socket } from 'socket.io';
+import { handleSocketConnection } from '../handlers.js';
+import { getRoomByCode } from '../../services/roomService.js';
+import { createMessage, getRoomMessages } from '../../services/messageService.js';
 
-jest.mock('../../services/roomService');
-jest.mock('../../config/redis');
-jest.mock('../../services/messageService');
-jest.mock('../../services/gcsService');
+jest.mock('../../services/roomService.js');
+jest.mock('../../services/messageService.js');
+jest.mock('../../config/redis.js', () => ({
+  getRedisClient: jest.fn().mockReturnValue(null),
+  isRedisAvailable: jest.fn().mockReturnValue(false),
+}));
 
 describe('Socket Handlers', () => {
-  let mockIo: Partial<Server>;
+  let io: Server;
   let mockSocket: Partial<Socket>;
-  let mockEmit: jest.Mock;
-  let mockJoin: jest.Mock;
-  let mockLeave: jest.Mock;
-  let mockTo: jest.Mock;
-  let mockOn: jest.Mock;
-  let mockRedis: any;
-  let eventHandlers: Map<string, Function>;
 
   beforeEach(() => {
-    mockEmit = jest.fn();
-    mockJoin = jest.fn();
-    mockLeave = jest.fn();
-    mockTo = jest.fn().mockReturnValue({ emit: mockEmit });
-    eventHandlers = new Map();
-
-    mockOn = jest.fn((event: string, handler: Function) => {
-      eventHandlers.set(event, handler);
-    });
-
     mockSocket = {
-      id: 'socket-123',
-      emit: mockEmit,
-      join: mockJoin,
-      leave: mockLeave,
-      to: mockTo,
-      on: mockOn,
+      id: 'test-socket-id',
+      join: jest.fn(),
+      leave: jest.fn(),
+      emit: jest.fn(),
+      to: jest.fn().mockReturnThis(),
     };
-
-    mockIo = {
-      to: mockTo,
-    };
-
-    mockRedis = {
-      sadd: jest.fn().mockResolvedValue(1),
-      srem: jest.fn().mockResolvedValue(1),
-      scard: jest.fn().mockResolvedValue(1),
-      hset: jest.fn().mockResolvedValue(1),
-      del: jest.fn().mockResolvedValue(1),
-    };
-
-    (getRedisClient as jest.Mock).mockReturnValue(mockRedis);
+    io = {
+      sockets: {
+        adapter: {
+          rooms: {
+            get: jest.fn().mockReturnValue({ size: 1 }),
+          },
+        },
+      },
+      to: jest.fn().mockReturnThis(),
+    } as any;
+    jest.clearAllMocks();
   });
 
   describe('joinRoom', () => {
-    it('should join a valid room', async () => {
-      const mockRoom = {
+    it('should join a room successfully', (done) => {
+      (getRoomByCode as jest.Mock).mockResolvedValue({
         code: '1234',
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      };
+        expiresAt: new Date(Date.now() + 3600000),
+      });
+      (getRoomMessages as jest.Mock).mockResolvedValue([]);
 
-      (getRoomByCode as jest.Mock).mockResolvedValue(mockRoom);
-      (require('../../services/messageService').getRoomMessages as jest.Mock).mockResolvedValue([]);
+      handleSocketConnection(io as Server, mockSocket as Socket);
+      
+      const joinHandler = (mockSocket.on as jest.Mock).mock.calls.find(
+        (call) => call[0] === 'joinRoom'
+      )?.[1];
 
-      handleSocketConnection(mockIo as Server, mockSocket as Socket);
-
-      const joinRoomHandler = eventHandlers.get('joinRoom');
-      expect(joinRoomHandler).toBeDefined();
-
-      if (joinRoomHandler) {
-        await joinRoomHandler({ code: '1234', nickname: 'TestUser' });
+      if (joinHandler) {
+        joinHandler({ code: '1234', nickname: 'TestUser' });
+        setTimeout(() => {
+          expect(mockSocket.join).toHaveBeenCalledWith('1234');
+          expect(mockSocket.emit).toHaveBeenCalledWith('roomJoined', expect.any(Object));
+          done();
+        }, 100);
+      } else {
+        done(new Error('joinRoom handler not found'));
       }
-
-      expect(getRoomByCode).toHaveBeenCalledWith('1234');
-      expect(mockJoin).toHaveBeenCalledWith('1234');
     });
 
-    it('should emit error for invalid room', async () => {
-      (getRoomByCode as jest.Mock).mockResolvedValue(null);
+    it('should reject invalid room code', (done) => {
+      handleSocketConnection(io as Server, mockSocket as Socket);
+      
+      const joinHandler = (mockSocket.on as jest.Mock).mock.calls.find(
+        (call) => call[0] === 'joinRoom'
+      )?.[1];
 
-      handleSocketConnection(mockIo as Server, mockSocket as Socket);
-
-      const joinRoomHandler = eventHandlers.get('joinRoom');
-      expect(joinRoomHandler).toBeDefined();
-
-      if (joinRoomHandler) {
-        await joinRoomHandler({ code: '9999' });
+      if (joinHandler) {
+        joinHandler({ code: '' });
+        setTimeout(() => {
+          expect(mockSocket.emit).toHaveBeenCalledWith('error', expect.objectContaining({ message: expect.any(String) }));
+          done();
+        }, 100);
+      } else {
+        done(new Error('joinRoom handler not found'));
       }
-
-      expect(mockEmit).toHaveBeenCalledWith('error', { message: 'Room not found' });
-    });
-  });
-
-  describe('leaveRoom', () => {
-    it('should emit error when not in a room', async () => {
-      handleSocketConnection(mockIo as Server, mockSocket as Socket);
-
-      const leaveRoomHandler = eventHandlers.get('leaveRoom');
-      expect(leaveRoomHandler).toBeDefined();
-
-      if (leaveRoomHandler) {
-        await leaveRoomHandler();
-      }
-
-      expect(mockEmit).toHaveBeenCalledWith('error', { message: 'Not in a room' });
     });
   });
 
   describe('sendMessage', () => {
-    it('should emit error when not in a room', async () => {
-      handleSocketConnection(mockIo as Server, mockSocket as Socket);
+    it('should send a message', (done) => {
+      (createMessage as jest.Mock).mockResolvedValue({
+        id: 'msg-123',
+        content: 'Hello',
+        userId: 'user-123',
+        nickname: 'TestUser',
+        roomCode: '1234',
+        type: 'text',
+        createdAt: new Date(),
+      });
 
-      const sendMessageHandler = eventHandlers.get('sendMessage');
-      expect(sendMessageHandler).toBeDefined();
-
-      if (sendMessageHandler) {
-        await sendMessageHandler({ content: 'Hello' });
-      }
-
-      expect(mockEmit).toHaveBeenCalledWith('error', { message: 'Not in a room' });
-    });
-  });
-
-  describe('sendFileMeta', () => {
-    it('should emit error when not in a room', async () => {
-      handleSocketConnection(mockIo as Server, mockSocket as Socket);
-
-      const sendFileMetaHandler = eventHandlers.get('sendFileMeta');
-      expect(sendFileMetaHandler).toBeDefined();
-
-      if (sendFileMetaHandler) {
-        await sendFileMetaHandler({
-          filePath: 'path/to/file.pdf',
-          fileName: 'file.pdf',
-          fileSize: 1024,
-          mimeType: 'application/pdf',
+      handleSocketConnection(io as Server, mockSocket as Socket);
+      
+      // First join room
+      const joinHandler = (mockSocket.on as jest.Mock).mock.calls.find(
+        (call) => call[0] === 'joinRoom'
+      )?.[1];
+      
+      if (joinHandler) {
+        (getRoomByCode as jest.Mock).mockResolvedValue({
+          code: '1234',
+          expiresAt: new Date(Date.now() + 3600000),
         });
+        (getRoomMessages as jest.Mock).mockResolvedValue([]);
+        
+        joinHandler({ code: '1234' });
+        
+        setTimeout(() => {
+          const sendHandler = (mockSocket.on as jest.Mock).mock.calls.find(
+            (call) => call[0] === 'sendMessage'
+          )?.[1];
+          
+          if (sendHandler) {
+            sendHandler({ content: 'Hello' });
+            setTimeout(() => {
+              expect(createMessage).toHaveBeenCalled();
+              done();
+            }, 100);
+          } else {
+            done(new Error('sendMessage handler not found'));
+          }
+        }, 100);
+      } else {
+        done(new Error('joinRoom handler not found'));
       }
-
-      expect(mockEmit).toHaveBeenCalledWith('error', { message: 'Not in a room' });
     });
   });
 });

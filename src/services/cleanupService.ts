@@ -1,11 +1,19 @@
-import { RoomModel } from '../models/Room';
-import { MessageModel } from '../models/Message';
-import { getRedisClient, isRedisAvailable } from '../config/redis';
-import { logger } from '../utils/logger';
+import mongoose from 'mongoose';
+import { RoomModel } from '../models/Room.js';
+import { MessageModel } from '../models/Message.js';
+import { getRedisClient, isRedisAvailable } from '../config/redis.js';
+import { deleteRoomFiles } from './gcsService.js';
+import { logger } from '../utils/logger.js';
 
 const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || '3600000', 10); // 1 hour default
 
 export const cleanupExpiredRooms = async (): Promise<void> => {
+  // Check if database is connected
+  if (mongoose.connection.readyState !== 1) {
+    logger.debug('Database not connected, skipping cleanup');
+    return;
+  }
+
   try {
     const now = new Date();
     // Use batch processing for large deletions
@@ -21,6 +29,13 @@ export const cleanupExpiredRooms = async (): Promise<void> => {
     }
 
     const roomCodes = expiredRooms.map((room) => room.code);
+    
+    // Delete files for each expired room
+    await Promise.all(
+      roomCodes.map(code => deleteRoomFiles(code).catch(err => {
+        logger.warn(`Failed to delete files for room ${code}`, { error: err });
+      }))
+    );
     
     // Delete rooms and messages in parallel
     const [roomResult, messageResult] = await Promise.all([
@@ -42,9 +57,9 @@ export const cleanupExpiredRooms = async (): Promise<void> => {
             }
           }
         }
-      } catch (error) {
+      } catch (error: any) {
         // Ignore Redis errors during cleanup
-        logger.debug('Redis cleanup skipped', { error });
+        logger.debug('Redis cleanup skipped', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -52,17 +67,29 @@ export const cleanupExpiredRooms = async (): Promise<void> => {
       roomCount: roomResult.deletedCount,
       messageCount: messageResult.deletedCount,
     });
-  } catch (error) {
-    logger.error('Error cleaning up expired rooms', { error });
+  } catch (error: any) {
+    logger.error('Error cleaning up expired rooms', { error: error instanceof Error ? error.message : String(error) });
   }
+};
+
+// DEPRECATED: Use autoVanishService.processAutoVanish() instead
+// This function is kept for backward compatibility but auto-vanish is now handled
+// by the dedicated auto-vanish worker service
+export const cleanupLockedRooms = async (): Promise<void> => {
+  // Auto-vanish is now handled by autoVanishService
+  // This function is kept for backward compatibility but does nothing
+  logger.debug('cleanupLockedRooms is deprecated, auto-vanish handled by autoVanishService');
 };
 
 export const startCleanupJob = (): NodeJS.Timeout => {
   logger.info('Starting cleanup job', { intervalMs: CLEANUP_INTERVAL_MS });
   
+  // Run cleanup immediately
   cleanupExpiredRooms();
+  // Note: cleanupLockedRooms is deprecated, auto-vanish handled by autoVanishService
   
   return setInterval(() => {
     cleanupExpiredRooms();
+    // Note: cleanupLockedRooms is deprecated, auto-vanish handled by autoVanishService
   }, CLEANUP_INTERVAL_MS);
 };

@@ -1,15 +1,20 @@
-import Redis from 'ioredis';
-import { logger } from '../utils/logger';
-import { env } from './env';
+import { default as Redis } from 'ioredis';
+import { logger } from '../utils/logger.js';
+import { env } from './env.js';
 
-let redisClient: Redis | null = null;
+let redisClient: any = null;
 let redisAvailable = false;
 
-export const getRedisClient = (): Redis | null => {
+export const getRedisClient = (): any => {
+  if (!env.REDIS_URL) {
+    return null;
+  }
+
   if (!redisClient) {
     try {
-      redisClient = new Redis(env.REDIS_URL, {
-        retryStrategy: (times) => {
+      const RedisClass = Redis as any;
+      const client = new RedisClass(env.REDIS_URL, {
+        retryStrategy: (times: number) => {
           // Retry with exponential backoff, max 10 seconds
           const delay = Math.min(times * 50, 10000);
           return delay;
@@ -19,35 +24,38 @@ export const getRedisClient = (): Redis | null => {
         lazyConnect: true,
       });
       
-      redisClient.on('error', (err) => {
+      redisClient = client;
+      
+      client.on('error', (err: any) => {
         redisAvailable = false;
         // Suppress connection errors - Redis is optional
         // Only log non-connection errors
-        if (err.code !== 'ECONNREFUSED' && err.code !== 'ENOTFOUND' && err.code !== 'ETIMEDOUT') {
-          logger.error('Redis error', { error: err });
+        const nodeError = err as NodeJS.ErrnoException;
+        if (nodeError.code !== 'ECONNREFUSED' && nodeError.code !== 'ENOTFOUND' && nodeError.code !== 'ETIMEDOUT') {
+          logger.error('Redis error', { error: err instanceof Error ? err.message : String(err) });
         }
       });
       
-      redisClient.on('connect', () => {
+      client.on('connect', () => {
         redisAvailable = true;
         logger.info('Connected to Redis');
       });
       
-      redisClient.on('ready', () => {
+      client.on('ready', () => {
         redisAvailable = true;
       });
       
-      redisClient.on('close', () => {
+      client.on('close', () => {
         redisAvailable = false;
       });
       
       // Try to connect, but don't fail if it doesn't work
-      redisClient.connect().catch(() => {
+      client.connect().catch(() => {
         // Silently fail - Redis is optional
         redisAvailable = false;
       });
-    } catch (error) {
-      logger.warn('Redis initialization failed, continuing without Redis', { error });
+    } catch (error: any) {
+      logger.warn('Redis initialization failed, continuing without Redis', { error: error instanceof Error ? error.message : String(error) });
       redisAvailable = false;
     }
   }
@@ -65,7 +73,7 @@ export const closeRedis = async (): Promise<void> => {
       redisClient = null;
       redisAvailable = false;
       logger.info('Redis connection closed');
-    } catch (error) {
+    } catch (error: any) {
       // Ignore errors on close
       redisClient = null;
       redisAvailable = false;

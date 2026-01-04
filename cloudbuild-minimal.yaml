@@ -1,0 +1,53 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:latest'
+      - '.'
+    dir: 'backend'
+
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:latest'
+
+  # Deploy container image to Cloud Run (minimal config)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'linkchat-backend'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--port'
+      - '8080'
+      - '--memory'
+      - '512Mi'
+      - '--timeout'
+      - '300'
+      - '--set-env-vars'
+      - 'PORT=8080,NODE_ENV=production'
+
+images:
+  - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
+  - 'gcr.io/$PROJECT_ID/linkchat-backend:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+

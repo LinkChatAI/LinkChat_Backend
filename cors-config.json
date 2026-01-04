@@ -1,0 +1,9 @@
+[
+  {
+    "origin": ["http://localhost:5173", "http://localhost:3000", "https://linkchat.in"],
+    "method": ["PUT", "GET", "POST", "HEAD", "OPTIONS"],
+    "responseHeader": ["Content-Type", "Content-Length", "x-goog-resumable"],
+    "maxAgeSeconds": 3600
+  }
+]
+

@@ -1,0 +1,119 @@
+import { getBucket } from '../config/gcs.js';
+import { env } from '../config/env.js';
+import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import fs from 'fs/promises';
+import { logger } from '../utils/logger.js';
+const LOCAL_UPLOAD_DIR = path.join(process.cwd(), 'uploads');
+// Ensure local upload directory exists
+const ensureUploadDir = async () => {
+    try {
+        await fs.mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
+    }
+    catch (error) {
+        logger.warn('Could not create upload directory', { error });
+    }
+};
+export const generateUploadUrl = async (roomCode, fileName, mimeType, fileSize) => {
+    if (fileSize > env.MAX_FILE_SIZE_BYTES) {
+        throw new Error(`File size exceeds maximum of ${env.MAX_FILE_SIZE_BYTES} bytes`);
+    }
+    const bucket = getBucket();
+    if (!bucket) {
+        // Local fallback - return indicator that local storage should be used
+        logger.debug('GCS not configured, using local file storage fallback');
+        const fileId = uuidv4();
+        const filePath = `rooms/${roomCode}/${fileId}-${fileName}`;
+        await ensureUploadDir();
+        // Return a placeholder URL - actual upload will be handled differently
+        return {
+            uploadUrl: '', // Empty URL signals local storage
+            filePath,
+            useLocal: true
+        };
+    }
+    const fileId = uuidv4();
+    const filePath = `rooms/${roomCode}/${fileId}-${fileName}`;
+    const file = bucket.file(filePath);
+    const [url] = await file.getSignedUrl({
+        version: 'v4',
+        action: 'write',
+        expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+        contentType: mimeType,
+    });
+    return { uploadUrl: url, filePath };
+};
+export const getFileUrl = (filePath) => {
+    const bucket = getBucket();
+    if (!bucket) {
+        throw new Error('GCS not configured');
+    }
+    return `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+};
+export const getDownloadUrl = async (filePath, fileName) => {
+    const bucket = getBucket();
+    if (!bucket) {
+        // Local fallback
+        return `/uploads/${filePath}`;
+    }
+    const file = bucket.file(filePath);
+    const [url] = await file.getSignedUrl({
+        version: 'v4',
+        action: 'read',
+        expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+        responseDisposition: `attachment; filename="${encodeURIComponent(fileName)}"`,
+    });
+    return url;
+};
+export const getImageUrl = async (filePath) => {
+    const bucket = getBucket();
+    if (!bucket) {
+        // Local fallback
+        return `/uploads/${filePath}`;
+    }
+    const file = bucket.file(filePath);
+    const [url] = await file.getSignedUrl({
+        version: 'v4',
+        action: 'read',
+        expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+        responseDisposition: 'inline',
+    });
+    return url;
+};
+/**
+ * Delete files for a specific room from GCS or local storage
+ */
+export const deleteRoomFiles = async (roomCode) => {
+    const bucket = getBucket();
+    if (bucket) {
+        // Delete from GCS
+        try {
+            const [files] = await bucket.getFiles({ prefix: `rooms/${roomCode}/` });
+            if (files.length > 0) {
+                await Promise.all(files.map(file => file.delete().catch(err => {
+                    logger.warn(`Failed to delete GCS file: ${file.name}`, { error: err });
+                })));
+                logger.info(`Deleted ${files.length} files from GCS for room ${roomCode}`);
+            }
+        }
+        catch (error) {
+            logger.error(`Error deleting GCS files for room ${roomCode}`, {
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+    else {
+        // Delete from local storage
+        try {
+            const roomDir = path.join(LOCAL_UPLOAD_DIR, 'rooms', roomCode);
+            await fs.rm(roomDir, { recursive: true, force: true });
+            logger.info(`Deleted local files for room ${roomCode}`);
+        }
+        catch (error) {
+            logger.warn(`Could not delete local files for room ${roomCode}`, {
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+};
+//# sourceMappingURL=gcsService.js.map

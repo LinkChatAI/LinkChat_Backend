@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { getRoomBySlugOrCode, getPublicRooms } from '../services/roomService';
-import { env } from '../config/env';
-import { logger } from '../utils/logger';
+import { getRoomBySlugOrCode, getPublicRooms } from '../services/roomService.js';
+import { env } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 
@@ -29,8 +29,15 @@ ${urls.join('\n')}
 
     res.set('Content-Type', 'application/xml');
     res.send(sitemap);
-  } catch (error) {
-    logger.error('Error generating sitemap', { error });
+  } catch (error: any) {
+    // Handle database connection errors
+    if (error instanceof Error && error.message === 'Database connection not available') {
+      logger.error('Database not available when generating sitemap');
+      res.status(503).send('Service temporarily unavailable');
+      return;
+    }
+    
+    logger.error('Error generating sitemap', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).send('Error generating sitemap');
   }
 });
@@ -103,8 +110,15 @@ router.get('/share/:slugOrCode', async (req: Request, res: Response): Promise<vo
 
     res.set('Content-Type', 'text/html');
     res.send(html);
-  } catch (error) {
-    logger.error('Error generating share page', { error });
+  } catch (error: any) {
+    // Handle database connection errors
+    if (error instanceof Error && error.message === 'Database connection not available') {
+      logger.error('Database not available when generating share page');
+      res.status(503).send('Service temporarily unavailable');
+      return;
+    }
+    
+    logger.error('Error generating share page', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).send('Error generating share page');
   }
 });

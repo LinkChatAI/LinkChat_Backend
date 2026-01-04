@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
-import { getRoomBySlugOrCode } from '../services/roomService';
-import { env } from '../config/env';
-import { logger } from '../utils/logger';
+import { getRoomBySlugOrCode } from '../services/roomService.js';
+import { env } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
 export const getShareMetaHandler = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -27,8 +27,15 @@ export const getShareMetaHandler = async (req: Request, res: Response): Promise<
       url: `${env.BASE_URL}/r/${room.slug || room.code}`,
       siteName: env.SITE_TITLE,
     });
-  } catch (error) {
-    logger.error('Error generating share metadata', { error });
+  } catch (error: any) {
+    // Handle database connection errors
+    if (error instanceof Error && error.message === 'Database connection not available') {
+      logger.error('Database not available when generating share metadata');
+      res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
+      return;
+    }
+    
+    logger.error('Error generating share metadata', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to generate metadata' });
   }
 };
