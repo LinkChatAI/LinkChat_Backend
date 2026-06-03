@@ -7,11 +7,43 @@ import { Room, CreateRoomRequest } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import { env } from '../config/env.js';
 
+/**
+ * Wait for database connection to be ready
+ * Retries up to 10 times with 500ms delay between attempts (max 5 seconds wait)
+ * Handles both disconnected (0) and connecting (2) states
+ */
+const waitForDatabase = async (maxRetries = 10, delayMs = 500): Promise<boolean> => {
+  for (let i = 0; i < maxRetries; i++) {
+    const readyState = mongoose.connection.readyState;
+    // readyState: 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+    if (readyState === 1) {
+      return true;
+    }
+    // If connecting (2), wait for it to complete
+    if (readyState === 2) {
+      logger.debug('Database is connecting, waiting...', { attempt: i + 1 });
+    } else if (readyState === 0) {
+      logger.debug('Database is disconnected, waiting for connection...', { attempt: i + 1 });
+    }
+    if (i < maxRetries - 1) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  return false;
+};
+
 export const createRoom = async (data?: CreateRoomRequest): Promise<Room> => {
-  // Check if database is connected
+  // Wait for database connection if not ready (handles cold start scenario)
   if (mongoose.connection.readyState !== 1) {
-    logger.error('Database not connected when creating room');
-    throw new Error('Database connection not available');
+    logger.debug('Database not ready, waiting for connection...', { 
+      readyState: mongoose.connection.readyState 
+    });
+    const isReady = await waitForDatabase();
+    if (!isReady) {
+      logger.error('Database connection not available after waiting');
+      throw new Error('Database connection not available');
+    }
+    logger.debug('Database connection ready, proceeding with room creation');
   }
 
   try {
@@ -19,17 +51,14 @@ export const createRoom = async (data?: CreateRoomRequest): Promise<Room> => {
     const token = generateToken(code);
     const expiresAt = new Date(Date.now() + env.DEFAULT_ROOM_EXP_HOURS * 60 * 60 * 1000);
 
-    let slug: string | undefined;
-    if (data?.name) {
-      slug = generateUniqueSlug(data.name, code);
-      // Ensure slug uniqueness
-      let existing = await RoomModel.findOne({ slug });
-      let counter = 1;
-      while (existing) {
-        slug = generateUniqueSlug(data.name, `${code}-${counter}`);
-        existing = await RoomModel.findOne({ slug });
-        counter++;
-      }
+    let slug = generateUniqueSlug(data?.name || '', code);
+    // Ensure slug uniqueness
+    let existing = await RoomModel.findOne({ slug });
+    let counter = 1;
+    while (existing) {
+      slug = generateUniqueSlug(data?.name || '', `${code}-${counter}`);
+      existing = await RoomModel.findOne({ slug });
+      counter++;
     }
 
     const room = new RoomModel({
@@ -38,9 +67,11 @@ export const createRoom = async (data?: CreateRoomRequest): Promise<Room> => {
       name: data?.name,
       slug,
       isPublic: data?.isPublic || false,
+      plan: data?.plan || 'free',
       expiresAt,
       participants: [],
-      ownerId: data?.userId, // Save userId as ownerId for RBAC
+      ownerId: data?.userId,
+      ownerUserId: data?.ownerUserId,
     });
 
     await room.save();
@@ -81,10 +112,13 @@ export const createRoom = async (data?: CreateRoomRequest): Promise<Room> => {
 };
 
 export const getRoomByCode = async (code: string): Promise<Room | null> => {
-  // Check if database is connected
+  // Wait for database connection if not ready
   if (mongoose.connection.readyState !== 1) {
-    logger.error('Database not connected when getting room by code');
-    throw new Error('Database connection not available');
+    const isReady = await waitForDatabase();
+    if (!isReady) {
+      logger.error('Database connection not available when getting room by code');
+      throw new Error('Database connection not available');
+    }
   }
 
   try {
@@ -121,10 +155,13 @@ export const getRoomBySlug = async (slug: string): Promise<Room | null> => {
 };
 
 export const getRoomBySlugOrCode = async (slugOrCode: string): Promise<Room | null> => {
-  // Check if database is connected
+  // Wait for database connection if not ready
   if (mongoose.connection.readyState !== 1) {
-    logger.error('Database not connected when getting room by slug or code');
-    throw new Error('Database connection not available');
+    const isReady = await waitForDatabase();
+    if (!isReady) {
+      logger.error('Database connection not available when getting room by slug or code');
+      throw new Error('Database connection not available');
+    }
   }
 
   try {
@@ -138,7 +175,7 @@ export const getRoomBySlugOrCode = async (slugOrCode: string): Promise<Room | nu
     const room = await getRoomBySlug(slugOrCode);
     if (room) return room;
 
-    // Try extracting code from slug format (e.g., "team-sync-8321")
+    // Try extracting code from slug format (e.g., "linkchat-team-sync-8321")
     const extractedCode = extractCodeFromSlug(slugOrCode);
     if (extractedCode) {
       return getRoomByCode(extractedCode);
@@ -255,6 +292,113 @@ export const removeParticipant = async (code: string, userId: string): Promise<R
     });
     throw error;
   }
+};
+
+export const unlockRoom = async (code: string): Promise<Room> => {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('Database connection not available');
+  }
+
+  const room = await RoomModel.findOneAndUpdate(
+    { code },
+    { isLocked: false, $unset: { lockedAt: '' } },
+    { new: true },
+  );
+
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  logger.info('Room unlocked', { code });
+  return room.toObject();
+};
+
+export const transferRoomOwnership = async (
+  code: string,
+  newOwnerId: string,
+): Promise<Room> => {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('Database connection not available');
+  }
+
+  const existing = await RoomModel.findOne({ code });
+  if (!existing) {
+    throw new Error('Room not found');
+  }
+
+  const coHostIds = (existing.coHostIds || []).filter((id) => id !== newOwnerId);
+
+  const room = await RoomModel.findOneAndUpdate(
+    { code },
+    { ownerId: newOwnerId, coHostIds },
+    { new: true },
+  );
+
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  logger.info('Room ownership transferred', { code, newOwnerId });
+  return room.toObject();
+};
+
+export const addRoomCoHost = async (code: string, userId: string): Promise<Room> => {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('Database connection not available');
+  }
+
+  const room = await RoomModel.findOneAndUpdate(
+    { code },
+    { $addToSet: { coHostIds: userId } },
+    { new: true },
+  );
+
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  return room.toObject();
+};
+
+export const removeRoomCoHost = async (code: string, userId: string): Promise<Room> => {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('Database connection not available');
+  }
+
+  const room = await RoomModel.findOneAndUpdate(
+    { code },
+    { $pull: { coHostIds: userId } },
+    { new: true },
+  );
+
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  return room.toObject();
+};
+
+export const setRoomSlowMode = async (
+  code: string,
+  messagesPerMinute: number,
+): Promise<Room> => {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('Database connection not available');
+  }
+
+  const limit = Math.max(0, Math.min(60, Math.floor(messagesPerMinute)));
+
+  const room = await RoomModel.findOneAndUpdate(
+    { code },
+    { slowModeMessagesPerMinute: limit },
+    { new: true },
+  );
+
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  return room.toObject();
 };
 
 export const lockRoom = async (code: string): Promise<Room> => {

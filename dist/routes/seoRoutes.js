@@ -10,6 +10,15 @@ router.get('/sitemap.xml', async (req, res) => {
         const baseUrl = env.BASE_URL;
         const urls = [
             `<url><loc>${baseUrl}/</loc><changefreq>daily</changefreq><priority>1.0</priority></url>`,
+            `<url><loc>${baseUrl}/create</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
+            `<url><loc>${baseUrl}/join</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
+            `<url><loc>${baseUrl}/linkchat-about</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>`,
+            `<url><loc>${baseUrl}/linkchat-how-it-works</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>`,
+            `<url><loc>${baseUrl}/linkchat-pricing</loc><changefreq>monthly</changefreq><priority>0.7</priority></url>`,
+            `<url><loc>${baseUrl}/linkchat-contact</loc><changefreq>yearly</changefreq><priority>0.4</priority></url>`,
+            `<url><loc>${baseUrl}/linkchat-create-room</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
+            `<url><loc>${baseUrl}/linkchat-join-room</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
+            `<url><loc>${baseUrl}/blog</loc><changefreq>weekly</changefreq><priority>0.7</priority></url>`,
         ];
         publicRooms.forEach((room) => {
             const path = room.slug || room.code;

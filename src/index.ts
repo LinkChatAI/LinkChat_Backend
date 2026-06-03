@@ -2,9 +2,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { connectDatabase } from './config/database.js';
 import { closeRedis } from './config/redis.js';
 import { handleSocketConnection } from './socket/handlers.js';
@@ -12,6 +15,11 @@ import roomRoutes from './routes/roomRoutes.js';
 import seoRoutes from './routes/seoRoutes.js';
 import nicknameRoutes from './routes/nicknameRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+import contactRoutes from './routes/contactRoutes.js';
+import fileRoutes from './routes/fileRoutes.js';
+import linkPreviewRoutes from './routes/linkPreviewRoutes.js';
+import authRoutes from './routes/authRoutes.js';
+import userRoutes from './routes/userRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startCleanupJob } from './services/cleanupService.js';
 import { logger } from './utils/logger.js';
@@ -19,24 +27,25 @@ import { env } from './config/env.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
-// CORS origin configuration - supports multiple origins
-const getCorsOrigin = (): string | string[] | boolean => {
+// CORS origin configuration - locked down to specific frontend URL
+const getCorsOrigin = (): string | string[] => {
   const frontendUrl = env.FRONTEND_URL || env.BASE_URL;
   
-  // If no URL is set, allow all origins (development only)
+  // Require frontend URL to be set - no permissive fallbacks
   if (!frontendUrl) {
-    if (env.NODE_ENV === 'production') {
-      logger.warn('No FRONTEND_URL or BASE_URL set in production. CORS will allow all origins.');
-      return true; // Allow all in production if not configured (not ideal but won't break)
-    }
-    return true; // Allow all in development
+    const errorMsg = 'FRONTEND_URL or BASE_URL must be set in environment variables for CORS configuration';
+    logger.error(errorMsg);
+    throw new Error(errorMsg);
   }
   
-  // Support comma-separated list of origins
+  // Support comma-separated list of origins (for multiple environments)
   if (frontendUrl.includes(',')) {
-    return frontendUrl.split(',').map(url => url.trim()).filter(Boolean);
+    const origins = frontendUrl.split(',').map(url => url.trim()).filter(Boolean);
+    logger.info(`CORS configured for multiple origins: ${origins.join(', ')}`);
+    return origins;
   }
   
+  logger.info(`CORS configured for frontend: ${frontendUrl}`);
   return frontendUrl;
 };
 
@@ -68,7 +77,50 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-secret'],
 }));
 
+// Security headers (hides "Powered by Express" and adds security headers)
+app.use(helmet());
+
+// Global rate limiter (for general routes)
+// Allow 100 requests per 15 minutes per IP
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+  message: { error: "Too many requests from this IP, please try again later." },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+
+// Apply global limiter to all API routes
+app.use('/api', globalLimiter);
+
+// Strict rate limiter — room creation only (low limit, prevents mass room spam)
+// 10 room creations per hour per IP
+const roomCreationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  message: { error: "You are doing that too much. Chill for a bit." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// File upload rate limiter — more lenient, normal chat usage sends many files
+// 100 upload URL requests per 15 minutes per IP
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+  message: { error: "Too many file uploads. Please slow down." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply limits to specific heavy routes
+// Room creation (POST /api/rooms)
+app.post('/api/rooms', roomCreationLimiter);
+// File upload URL generation
+app.use('/api/files/get-upload-url', uploadLimiter);
+
 // Body parser with size limits
+app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -202,9 +254,23 @@ app.post('/api/admin/reconnect-db', async (req, res) => {
 app.use('/', seoRoutes);
 
 // API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/user', userRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/nickname', nicknameRoutes);
+app.use('/api/contact', contactRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/files', fileRoutes);
+
+// Link preview (OG cards) with rate limit
+const linkPreviewLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Too many link preview requests. Please slow down.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/link-preview', linkPreviewLimiter, linkPreviewRoutes);
 
 app.use(errorHandler);
 

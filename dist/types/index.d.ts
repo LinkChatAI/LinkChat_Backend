@@ -1,6 +1,7 @@
 export interface Room {
     code: string;
     token: string;
+    ownerId?: string;
     name?: string;
     slug?: string;
     isPublic?: boolean;
@@ -10,6 +11,11 @@ export interface Room {
     isEnded?: boolean;
     endedAt?: Date;
     endedBy?: string;
+    isLocked?: boolean;
+    lockedAt?: Date;
+    coHostIds?: string[];
+    slowModeMessagesPerMinute?: number;
+    storageUsed?: number;
 }
 export interface Message {
     id: string;
@@ -18,7 +24,7 @@ export interface Message {
     nickname: string;
     avatar?: string;
     content: string;
-    type: 'text' | 'file';
+    type: 'text' | 'file' | 'image' | 'video';
     fileMeta?: {
         name: string;
         size: number;
@@ -33,11 +39,14 @@ export interface Message {
     isPinned?: boolean;
     createdAt: Date;
     expiresAt?: Date;
+    deletedByAdmin?: boolean;
+    tempId?: string;
 }
 export interface CreateRoomRequest {
     nickname?: string;
     name?: string;
     isPublic?: boolean;
+    userId?: string;
 }
 export interface JoinRoomRequest {
     nickname?: string;

@@ -17,6 +17,8 @@ export declare const validateMimeType: (mimeType: string, fileName?: string) => 
 export declare const sanitizeFilename: (filename: string) => string;
 /**
  * Validate and sanitize file upload data
+ * NOTE: File size validation should be done separately before calling this function
+ * (size limits vary by file type - videos can be larger than images)
  */
 export declare const validateFileUpload: (fileName: string, mimeType: string, fileSize: number) => {
     valid: boolean;

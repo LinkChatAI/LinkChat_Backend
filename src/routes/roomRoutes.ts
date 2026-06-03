@@ -8,14 +8,16 @@ import {
   validatePairingCodeHandler,
   endRoomHandler,
   leaveRoomHandler,
+  deleteRoomHandler,
 } from '../controllers/roomController.js';
 import { getShareMetaHandler } from '../controllers/seoController.js';
 import { authenticateRoom } from '../middleware/auth.js';
+import { optionalAuthenticateUser } from '../middleware/userAuth.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
 
-router.post('/', rateLimiter('createRoom'), createRoomHandler);
+router.post('/', rateLimiter('createRoom'), optionalAuthenticateUser, createRoomHandler);
 router.get('/:slugOrCode', rateLimiter('getRoom'), getRoomHandler);
 router.get('/:slugOrCode/sharemeta', rateLimiter('getRoom'), getShareMetaHandler);
 router.post('/:code/upload-url', rateLimiter('uploadUrl'), authenticateRoom, generateUploadUrlHandler);
@@ -24,6 +26,7 @@ router.post('/:code/pairing/generate', rateLimiter('default'), generatePairingCo
 router.post('/pairing/validate', rateLimiter('default'), validatePairingCodeHandler);
 router.post('/:code/end', rateLimiter('default'), authenticateRoom, endRoomHandler);
 router.post('/:code/leave', rateLimiter('default'), leaveRoomHandler);
+router.delete('/:code', rateLimiter('default'), deleteRoomHandler);
 
 export default router;
 

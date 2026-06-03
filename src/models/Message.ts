@@ -9,7 +9,7 @@ const MessageSchema = new Schema<IMessage>(
     nickname: { type: String, required: true },
     avatar: { type: String },
     content: { type: String, required: true },
-    type: { type: String, enum: ['text', 'file'], default: 'text' },
+    type: { type: String, enum: ['text', 'file', 'image', 'video'], default: 'text' },
     fileMeta: {
       name: String,
       size: Number,
@@ -31,8 +31,6 @@ const MessageSchema = new Schema<IMessage>(
 MessageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 // Compound index for room message queries (most common)
 MessageSchema.index({ roomCode: 1, createdAt: -1 });
-// Index for message ID lookups
-MessageSchema.index({ id: 1 }, { unique: true });
 // Index for user message queries (for deletion)
 MessageSchema.index({ id: 1, userId: 1 });
 // Index for pinned messages

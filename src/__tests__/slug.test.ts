@@ -20,22 +20,30 @@ describe('Slug utilities', () => {
   });
 
   describe('generateUniqueSlug', () => {
-    it('should append code to slug', () => {
-      expect(generateUniqueSlug('Team Sync', '8321')).toBe('team-sync-8321');
+    it('should prefix with linkchat and append code', () => {
+      expect(generateUniqueSlug('Team Sync', '8321')).toBe('linkchat-team-sync-8321');
     });
 
-    it('should return code if base slug is empty', () => {
-      expect(generateUniqueSlug('', '8321')).toBe('8321');
+    it('should use linkchat-code when base slug is empty', () => {
+      expect(generateUniqueSlug('', '8321')).toBe('linkchat-8321');
+    });
+
+    it('should not double the linkchat prefix', () => {
+      expect(generateUniqueSlug('LinkChat Party', '8321')).toBe('linkchat-party-8321');
     });
   });
 
   describe('extractCodeFromSlug', () => {
     it('should extract code from slug', () => {
+      expect(extractCodeFromSlug('linkchat-team-sync-8321')).toBe('8321');
+    });
+
+    it('should extract code from legacy slugs without prefix', () => {
       expect(extractCodeFromSlug('team-sync-8321')).toBe('8321');
     });
 
     it('should return null if no code found', () => {
-      expect(extractCodeFromSlug('team-sync')).toBeNull();
+      expect(extractCodeFromSlug('linkchat-team-sync')).toBeNull();
     });
   });
 

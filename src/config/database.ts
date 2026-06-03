@@ -1,3 +1,4 @@
+import dns from 'node:dns';
 import mongoose from 'mongoose';
 import { logger } from '../utils/logger.js';
 import { env } from './env.js';
@@ -5,7 +6,24 @@ import { env } from './env.js';
 const MAX_RETRIES = 5;
 const RETRY_DELAY = 5000; // 5 seconds
 
+/** Node on Windows can fail mongodb+srv SRV lookups while system nslookup works. */
+const configureMongoDns = (): void => {
+  if (!env.MONGO_URI?.startsWith('mongodb+srv://')) return;
+
+  dns.setDefaultResultOrder('ipv4first');
+  const custom = process.env.MONGO_DNS_SERVERS?.split(',').map((s) => s.trim()).filter(Boolean);
+  if (custom?.length) {
+    dns.setServers(custom);
+    return;
+  }
+  // Dev fallback: corporate/local DNS often refuses Node SRV queries
+  if (process.env.NODE_ENV !== 'production') {
+    dns.setServers(['8.8.8.8', '1.1.1.1']);
+  }
+};
+
 export const connectDatabase = async (retries = 0): Promise<void> => {
+  configureMongoDns();
   if (!env.MONGO_URI) {
     logger.warn('MONGO_URI not set, skipping database connection');
     logger.warn('Set MONGO_URI in .env file to enable database connection');

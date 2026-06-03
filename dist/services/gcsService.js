@@ -5,105 +5,210 @@ import path from 'path';
 import fs from 'fs/promises';
 import { logger } from '../utils/logger.js';
 const LOCAL_UPLOAD_DIR = path.join(process.cwd(), 'uploads');
-// Ensure local upload directory exists
+const getBackendUrl = () => env.BACKEND_URL || 'http://localhost:8080';
+let gcsHealthStatus = 'unknown';
+let gcsHealthCheckedAt = 0;
+const GCS_HEALTH_CACHE_MS = 5 * 60 * 1000; // Re-probe every 5 minutes
+/**
+ * Probe GCS with a real API call to verify billing + auth are working.
+ * Result is cached for GCS_HEALTH_CACHE_MS to avoid repeated probing.
+ */
+/** Mark GCS unavailable (e.g. client reported billing/auth failure on upload). */
+export const markGcsUnavailable = () => {
+    gcsHealthStatus = 'unavailable';
+    gcsHealthCheckedAt = Date.now();
+};
+export const probeGcsHealth = async () => {
+    const now = Date.now();
+    // Return cached result if still fresh
+    if (gcsHealthStatus !== 'unknown' && now - gcsHealthCheckedAt < GCS_HEALTH_CACHE_MS) {
+        return gcsHealthStatus === 'healthy';
+    }
+    const bucket = getBucket();
+    if (!bucket) {
+        gcsHealthStatus = 'unavailable';
+        gcsHealthCheckedAt = now;
+        return false;
+    }
+    try {
+        // bucket.getMetadata() makes a real API call — requires billing to be active
+        await bucket.getMetadata();
+        if (gcsHealthStatus !== 'healthy') {
+            logger.info('GCS health probe: healthy — using GCS for file storage');
+        }
+        gcsHealthStatus = 'healthy';
+        gcsHealthCheckedAt = now;
+        return true;
+    }
+    catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        logger.warn('GCS health probe failed — falling back to local storage', { error: msg });
+        gcsHealthStatus = 'unavailable';
+        gcsHealthCheckedAt = now;
+        return false;
+    }
+};
+// ─── Local Storage Helpers ────────────────────────────────────────────────────
 const ensureUploadDir = async () => {
     try {
         await fs.mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
     }
-    catch (error) {
-        logger.warn('Could not create upload directory', { error });
-    }
+    catch (_) { /* ignore */ }
 };
+export const generateLocalUploadUrl = async (roomCode, fileName) => {
+    await ensureUploadDir();
+    const fileId = uuidv4();
+    const filePath = `rooms/${roomCode}/${fileId}-${fileName}`;
+    const uploadUrl = `${getBackendUrl()}/api/uploads/${encodeURIComponent(filePath)}`;
+    return { uploadUrl, filePath };
+};
+const getLocalFileUrl = (filePath) => `${getBackendUrl()}/uploads/${filePath}`;
+// ─── Public API ───────────────────────────────────────────────────────────────
+/**
+ * Generate an upload URL.
+ *
+ * Priority:
+ *   1. GCS (if configured AND health probe passes — billing + auth must be working)
+ *   2. Local storage (automatic hard fallback on ANY GCS issue)
+ *
+ * NEVER throws due to GCS issues.
+ */
 export const generateUploadUrl = async (roomCode, fileName, mimeType, fileSize) => {
     if (fileSize > env.MAX_FILE_SIZE_BYTES) {
         throw new Error(`File size exceeds maximum of ${env.MAX_FILE_SIZE_BYTES} bytes`);
     }
+    const gcsHealthy = await probeGcsHealth();
+    if (!gcsHealthy) {
+        const result = await generateLocalUploadUrl(roomCode, fileName);
+        logger.debug('Using local upload (GCS unavailable)', { roomCode, fileName });
+        return { ...result, isLocal: true };
+    }
     const bucket = getBucket();
-    if (!bucket) {
-        // Local fallback - return indicator that local storage should be used
-        logger.debug('GCS not configured, using local file storage fallback');
+    try {
         const fileId = uuidv4();
         const filePath = `rooms/${roomCode}/${fileId}-${fileName}`;
-        await ensureUploadDir();
-        // Return a placeholder URL - actual upload will be handled differently
-        return {
-            uploadUrl: '', // Empty URL signals local storage
-            filePath,
-            useLocal: true
-        };
+        const file = bucket.file(filePath);
+        const [url] = await file.getSignedUrl({
+            version: 'v4',
+            action: 'write',
+            expires: Date.now() + 15 * 60 * 1000,
+            contentType: mimeType,
+        });
+        logger.debug('GCS upload URL generated', { roomCode, fileName, filePath });
+        return { uploadUrl: url, filePath };
     }
-    const fileId = uuidv4();
-    const filePath = `rooms/${roomCode}/${fileId}-${fileName}`;
-    const file = bucket.file(filePath);
-    const [url] = await file.getSignedUrl({
-        version: 'v4',
-        action: 'write',
-        expires: Date.now() + 15 * 60 * 1000, // 15 minutes
-        contentType: mimeType,
-    });
-    return { uploadUrl: url, filePath };
-};
-export const getFileUrl = (filePath) => {
-    const bucket = getBucket();
-    if (!bucket) {
-        throw new Error('GCS not configured');
+    catch (error) {
+        // Signing failed despite healthy probe — mark unhealthy and hard-fallback
+        logger.warn('GCS getSignedUrl failed — falling back to local storage', {
+            error: error instanceof Error ? error.message : String(error),
+            roomCode,
+            fileName,
+        });
+        gcsHealthStatus = 'unavailable';
+        gcsHealthCheckedAt = Date.now();
+        const result = await generateLocalUploadUrl(roomCode, fileName);
+        return { ...result, isLocal: true };
     }
-    return `https://storage.googleapis.com/${bucket.name}/${filePath}`;
-};
-export const getDownloadUrl = async (filePath, fileName) => {
-    const bucket = getBucket();
-    if (!bucket) {
-        // Local fallback
-        return `/uploads/${filePath}`;
-    }
-    const file = bucket.file(filePath);
-    const [url] = await file.getSignedUrl({
-        version: 'v4',
-        action: 'read',
-        expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
-        responseDisposition: `attachment; filename="${encodeURIComponent(fileName)}"`,
-    });
-    return url;
-};
-export const getImageUrl = async (filePath) => {
-    const bucket = getBucket();
-    if (!bucket) {
-        // Local fallback
-        return `/uploads/${filePath}`;
-    }
-    const file = bucket.file(filePath);
-    const [url] = await file.getSignedUrl({
-        version: 'v4',
-        action: 'read',
-        expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
-        responseDisposition: 'inline',
-    });
-    return url;
 };
 /**
- * Delete files for a specific room from GCS or local storage
+ * Get the public/serve URL for a stored file.
+ * Hard-falls back to local URL if GCS is unavailable.
+ * NEVER throws.
+ */
+export const getFileUrl = (filePath) => {
+    if (gcsHealthStatus !== 'healthy') {
+        return getLocalFileUrl(filePath);
+    }
+    const bucket = getBucket();
+    if (!bucket)
+        return getLocalFileUrl(filePath);
+    return `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+};
+/**
+ * Get a signed inline URL for displaying an image/video.
+ * Hard-falls back to local URL on any GCS error.
+ * NEVER throws.
+ */
+export const getImageUrl = async (filePath) => {
+    if (gcsHealthStatus !== 'healthy')
+        return getLocalFileUrl(filePath);
+    const bucket = getBucket();
+    if (!bucket)
+        return getLocalFileUrl(filePath);
+    try {
+        const [url] = await bucket.file(filePath).getSignedUrl({
+            version: 'v4',
+            action: 'read',
+            expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
+            responseDisposition: 'inline',
+        });
+        return url;
+    }
+    catch (error) {
+        logger.warn('GCS getImageUrl failed — using local fallback', {
+            error: error instanceof Error ? error.message : String(error),
+            filePath,
+        });
+        gcsHealthStatus = 'unavailable';
+        gcsHealthCheckedAt = Date.now();
+        return getLocalFileUrl(filePath);
+    }
+};
+/**
+ * Get a signed download URL for a file attachment.
+ * Hard-falls back to local URL on any GCS error.
+ * NEVER throws.
+ */
+export const getDownloadUrl = async (filePath, fileName) => {
+    if (gcsHealthStatus !== 'healthy')
+        return getLocalFileUrl(filePath);
+    const bucket = getBucket();
+    if (!bucket)
+        return getLocalFileUrl(filePath);
+    try {
+        const [url] = await bucket.file(filePath).getSignedUrl({
+            version: 'v4',
+            action: 'read',
+            expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
+            responseDisposition: `attachment; filename="${encodeURIComponent(fileName)}"`,
+        });
+        return url;
+    }
+    catch (error) {
+        logger.warn('GCS getDownloadUrl failed — using local fallback', {
+            error: error instanceof Error ? error.message : String(error),
+            filePath,
+        });
+        gcsHealthStatus = 'unavailable';
+        gcsHealthCheckedAt = Date.now();
+        return getLocalFileUrl(filePath);
+    }
+};
+/**
+ * Expose current GCS health status for fileController to use.
+ */
+export const isGcsHealthy = () => gcsHealthStatus === 'healthy';
+/**
+ * Delete files for a specific room.
+ * Failures are logged but never propagated.
  */
 export const deleteRoomFiles = async (roomCode) => {
     const bucket = getBucket();
-    if (bucket) {
-        // Delete from GCS
+    if (bucket && gcsHealthStatus === 'healthy') {
         try {
             const [files] = await bucket.getFiles({ prefix: `rooms/${roomCode}/` });
             if (files.length > 0) {
-                await Promise.all(files.map(file => file.delete().catch(err => {
-                    logger.warn(`Failed to delete GCS file: ${file.name}`, { error: err });
-                })));
-                logger.info(`Deleted ${files.length} files from GCS for room ${roomCode}`);
+                await Promise.all(files.map((file) => file.delete().catch((err) => logger.warn(`Failed to delete GCS file: ${file.name}`, { error: err }))));
+                logger.info(`Deleted ${files.length} GCS files for room ${roomCode}`);
             }
         }
         catch (error) {
-            logger.error(`Error deleting GCS files for room ${roomCode}`, {
-                error: error instanceof Error ? error.message : String(error)
+            logger.warn(`GCS deleteRoomFiles failed for room ${roomCode} (non-critical)`, {
+                error: error instanceof Error ? error.message : String(error),
             });
         }
     }
     else {
-        // Delete from local storage
         try {
             const roomDir = path.join(LOCAL_UPLOAD_DIR, 'rooms', roomCode);
             await fs.rm(roomDir, { recursive: true, force: true });
@@ -111,7 +216,7 @@ export const deleteRoomFiles = async (roomCode) => {
         }
         catch (error) {
             logger.warn(`Could not delete local files for room ${roomCode}`, {
-                error: error instanceof Error ? error.message : String(error)
+                error: error instanceof Error ? error.message : String(error),
             });
         }
     }

@@ -33,6 +33,18 @@ const RATE_LIMITS: Record<string, RateLimitConfig> = {
     windowMs: 60 * 1000, // 1 minute
     maxRequests: 10, // 10 action requests per minute
   },
+  contactSubmit: {
+    windowMs: 60 * 60 * 1000, // 1 hour
+    maxRequests: 5, // 5 submissions per hour per IP (additional email-based limit in controller)
+  },
+  authOAuth: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 20,
+  },
+  authRefresh: {
+    windowMs: 15 * 60 * 1000,
+    maxRequests: 30,
+  },
   default: {
     windowMs: 60 * 1000, // 1 minute
     maxRequests: 10, // 10 requests per minute

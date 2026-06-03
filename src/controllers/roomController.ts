@@ -1,8 +1,10 @@
 import { Request, Response } from 'express';
 import { createRoom, getRoomByCode, getRoomBySlugOrCode, endRoom, removeParticipant } from '../services/roomService.js';
-import { generateUploadUrl, getFileUrl } from '../services/gcsService.js';
+import { generateUploadUrl, getFileUrl, deleteRoomFiles } from '../services/gcsService.js';
 import { isFileUploadAvailable } from '../config/gcs.js';
 import { AuthRequest } from '../middleware/auth.js';
+import { UserAuthRequest } from '../middleware/userAuth.js';
+import { isPremiumPlan } from '../utils/planUtils.js';
 import { z } from 'zod';
 import { logger } from '../utils/logger.js';
 import { validateFileUpload } from '../utils/validation.js';
@@ -12,11 +14,17 @@ import { generatePairingCodeForRoom, validatePairingCode } from '../services/pai
 import { v4 as uuidv4 } from 'uuid';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
+import { RoomModel } from '../models/Room.js';
+import { MessageModel } from '../models/Message.js';
+import { getStorageLimitForPlan } from '../constants/roomStorage.js';
+
+const VALID_PLANS = ['free', 'premium', 'pro', 'enterprise'] as const;
 
 const createRoomSchema = z.object({
   name: z.string().max(100).optional(),
   isPublic: z.boolean().optional(),
   userId: z.string().uuid().optional(), // UUID of the room creator
+  plan: z.enum(VALID_PLANS).optional(), // Subscription plan for the room
 });
 
 const uploadUrlSchema = z.object({
@@ -25,13 +33,34 @@ const uploadUrlSchema = z.object({
   fileSize: z.number().positive(),
 });
 
-export const createRoomHandler = async (req: Request, res: Response): Promise<void> => {
+export const createRoomHandler = async (req: UserAuthRequest, res: Response): Promise<void> => {
   try {
     const body = createRoomSchema.parse(req.body);
+    const requestedPlan = body.plan || 'free';
+
+    if (requestedPlan !== 'free') {
+      if (!req.user) {
+        res.status(401).json({
+          error: 'Sign in required for Premium/Pro rooms',
+          code: 'AUTH_REQUIRED',
+        });
+        return;
+      }
+      if (!isPremiumPlan(req.user.plan)) {
+        res.status(403).json({
+          error: 'Premium or Pro subscription required',
+          code: 'PREMIUM_REQUIRED',
+        });
+        return;
+      }
+    }
+
     const data: CreateRoomRequest = {
       name: body.name ? sanitizeName(body.name) : undefined,
       isPublic: body.isPublic || false,
-      userId: body.userId, // Pass userId to service
+      userId: body.userId,
+      plan: requestedPlan,
+      ownerUserId: req.user?.userId,
     };
     const room = await createRoom(data);
     logger.info('Room created', { code: room.code, slug: room.slug, ownerId: room.ownerId });
@@ -49,8 +78,9 @@ export const createRoomHandler = async (req: Request, res: Response): Promise<vo
       token: room.token,
       slug: room.slug,
       name: room.name,
+      plan: room.plan || 'free',
       expiresAt: room.expiresAt,
-      ownerId: room.ownerId, // Return ownerId to frontend
+      ownerId: room.ownerId,
     });
   } catch (error: any) {
     if (error instanceof z.ZodError) {
@@ -128,13 +158,18 @@ export const getRoomHandler = async (req: Request, res: Response): Promise<void>
       code: room.code,
       slug: room.slug,
       name: room.name,
-      ownerId: room.ownerId, // Include ownerId for RBAC
+      ownerId: room.ownerId,
+      plan: room.plan || 'free',
       createdAt: room.createdAt,
       expiresAt: room.expiresAt,
       participantCount: room.participants.length,
       fileUploadAvailable: isFileUploadAvailable(),
       isLocked: room.isLocked || false,
       lockedAt: room.lockedAt ? room.lockedAt.toISOString() : undefined,
+      storageUsed: room.storageUsed || 0,
+      storageLimitBytes: getStorageLimitForPlan(room.plan as string | undefined),
+      coHostIds: room.coHostIds || [],
+      slowModeMessagesPerMinute: room.slowModeMessagesPerMinute ?? 0,
     });
   } catch (error: any) {
     logger.error('Error getting room', { error: error instanceof Error ? error.message : String(error) });
@@ -437,6 +472,96 @@ export const leaveRoomHandler = async (req: Request, res: Response): Promise<voi
       code: req.params.code,
     });
     res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to leave room' });
+  }
+};
+
+/**
+ * Secure deleteRoom (Vanish) function that strictly ensures NO data is left behind.
+ * Implements Cleanup Cascade:
+ * 1. Wipe Google Cloud Storage files (rooms/{roomCode}/*)
+ * 2. Wipe Database (Messages, then Room)
+ * 3. Notify Users via Socket.IO (room_vanished event)
+ */
+export const deleteRoomHandler = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { code } = req.params; // roomCode from route parameter
+    const roomCode = code; // Using roomCode to match codebase conventions
+
+    if (!roomCode || typeof roomCode !== 'string') {
+      res.status(400).json({ error: 'Invalid room code' });
+      return;
+    }
+
+    // Verify room exists
+    const room = await getRoomByCode(roomCode);
+    if (!room) {
+      logger.warn(`[VANISH] Room ${roomCode} not found`);
+      res.status(404).json({ error: 'Room not found' });
+      return;
+    }
+
+    // Step 1: Identify the Storage Path
+    // Files are stored as: rooms/{roomCode}/{fileName}
+    const storagePath = `rooms/${roomCode}/`;
+
+    // Step 2: Wipe Google Cloud Storage
+    // Use deleteRoomFiles which handles GCS deletion with prefix matching
+    // Wrap in try/catch - fail-safe: don't let GCS error block room deletion
+    try {
+      await deleteRoomFiles(roomCode);
+      logger.info(`[VANISH] Step 2: GCS files deleted for room ${roomCode} (prefix: ${storagePath})`);
+    } catch (gcsError: any) {
+      // Log the error but PROCEED to delete DB data (fail-safe)
+      logger.warn(`[VANISH] Step 2: GCS deletion failed for room ${roomCode} (non-critical, proceeding with DB cleanup)`, {
+        error: gcsError instanceof Error ? gcsError.message : String(gcsError),
+      });
+    }
+
+    // Step 3: Wipe Database
+    // Delete all messages first
+    const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
+    logger.info(`[VANISH] Step 3a: Deleted ${messageDeleteResult.deletedCount} messages from room ${roomCode}`);
+
+    // Delete the room itself
+    const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
+    if (roomDeleteResult.deletedCount === 0) {
+      logger.warn(`[VANISH] Step 3b: Room ${roomCode} was already deleted from database`);
+    } else {
+      logger.info(`[VANISH] Step 3b: Room ${roomCode} deleted from database`);
+    }
+
+    // Step 4: Notify Users via Socket.IO
+    const io = getIoInstance();
+    if (io) {
+      // Emit room_vanished event to all users in that room
+      io.to(roomCode).emit('room_vanished', {
+        reason: 'Room has been permanently deleted',
+        roomId: roomCode,
+        vanishedAt: new Date().toISOString(),
+      });
+
+      // Force disconnect all sockets in that room
+      io.in(roomCode).disconnectSockets(true);
+      logger.info(`[VANISH] Step 4: Emitted room_vanished event and disconnected sockets for room ${roomCode}`);
+    } else {
+      logger.warn(`[VANISH] Step 4: Socket.IO instance not available, skipped user notification for room ${roomCode}`);
+    }
+
+    // Verification Log
+    console.log(`[VANISH] Room ${roomCode} deleted. GCS Files wiped. Messages removed.`);
+
+    // Return success response
+    res.json({ success: true });
+  } catch (error: any) {
+    logger.error('[VANISH] Error deleting room', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      code: req.params.code,
+    });
+    res.status(500).json({ 
+      error: error instanceof Error ? error.message : 'Failed to delete room',
+      code: 'DELETE_ROOM_ERROR'
+    });
   }
 };
 

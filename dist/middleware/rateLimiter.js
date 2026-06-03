@@ -13,6 +13,22 @@ const RATE_LIMITS = {
         windowMs: 60 * 1000, // 1 minute
         maxRequests: 20, // 20 upload URLs per minute
     },
+    adminDashboard: {
+        windowMs: 60 * 1000, // 1 minute
+        maxRequests: 30, // 30 dashboard requests per minute
+    },
+    adminInsight: {
+        windowMs: 10 * 1000, // 10 seconds
+        maxRequests: 10, // 10 insight requests per 10 seconds
+    },
+    adminAction: {
+        windowMs: 60 * 1000, // 1 minute
+        maxRequests: 10, // 10 action requests per minute
+    },
+    contactSubmit: {
+        windowMs: 60 * 60 * 1000, // 1 hour
+        maxRequests: 5, // 5 submissions per hour per IP (additional email-based limit in controller)
+    },
     default: {
         windowMs: 60 * 1000, // 1 minute
         maxRequests: 10, // 10 requests per minute
@@ -27,8 +43,11 @@ export const rateLimiter = (type = 'default') => {
             next();
             return;
         }
-        // Generate key based on IP and endpoint type
-        const key = `rate_limit:${type}:${req.ip}`;
+        // For admin routes, use admin ID if available, otherwise IP
+        const adminId = req.adminId;
+        const identifier = adminId || req.ip || 'unknown';
+        // Generate key based on identifier and endpoint type
+        const key = `rate_limit:${type}:${identifier}`;
         try {
             const count = await redis.incr(key);
             if (count === 1) {

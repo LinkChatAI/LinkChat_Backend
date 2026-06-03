@@ -31,17 +31,28 @@ const getDayWiseData = (startDate: Date, endDate: Date, data: Array<{ date: Date
 };
 
 // Helper to calculate current insights from database (source of truth)
+// Add mutex to prevent race conditions from concurrent calculations
+let calculatingInsights = false;
 const calculateInsights = async () => {
-  const now = new Date();
-  const startOfDay = new Date(now);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(now);
-  endOfDay.setHours(23, 59, 59, 999);
-  const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000);
-  const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-
+  // Prevent concurrent calculations
+  if (calculatingInsights) {
+    // Wait a bit and retry
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (calculatingInsights) {
+      // Still calculating, wait longer
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  
+  calculatingInsights = true;
   try {
+    // Use UTC for consistent day boundaries across timezones
+    const now = new Date();
+    const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+    const endOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+    const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000);
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     // Overview & Rooms metrics
     const [
       totalRooms,
@@ -509,7 +520,7 @@ const calculateInsights = async () => {
 
     // User Growth metrics
     const yesterdayStart = new Date(startOfDay);
-    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+    yesterdayStart.setUTCDate(yesterdayStart.getUTCDate() - 1);
     const yesterdayEnd = new Date(startOfDay);
     
     const [
@@ -765,17 +776,16 @@ const calculateInsights = async () => {
       ])
     ]);
 
-    // System Signals metrics
-    // Note: These would ideally be tracked in Redis, but for now we'll use placeholders
-    // In production, you'd track these in Redis counters
-    const reconnectAttempts = 0; // TODO: Track in Redis
-    const failedJoinAttempts = 0; // TODO: Track in Redis
-    const usersBlockedLockedVanished = 0; // TODO: Track in Redis
+    const { getTodayMetrics } = await import('../services/platformMetricsService.js');
+    const platformMetrics = getTodayMetrics();
 
-    // System metrics
+    const reconnectAttempts = platformMetrics.reconnectAttempts;
+    const failedJoinAttempts = platformMetrics.failedJoinAttempts;
+    const usersBlockedLockedVanished = platformMetrics.usersBlockedLockedVanished;
+
     const io = getIoInstance();
     const socketConnectionsLive = io ? io.sockets.sockets.size : 0;
-    const failedRoomJoins = 0; // TODO: Track in Redis
+    const failedRoomJoins = platformMetrics.failedRoomJoins;
     const autoVanishJobsRunning = 1; // Assuming one job is always running
 
     // Get users in locked rooms
@@ -791,31 +801,22 @@ const calculateInsights = async () => {
       }
     });
 
-    // Get users online from Redis
-    let usersOnline = 0;
-    const redis = getRedis();
-    if (redis && isRedisAvailable()) {
-      try {
-        const keys = await redis.keys('room:*:users');
-        const userIds = new Set<string>();
-        for (const key of keys) {
-          const roomUsers = await redis.smembers(key);
-          roomUsers.forEach((userId: string) => userIds.add(userId));
-        }
-        usersOnline = userIds.size;
-      } catch (error: any) {
-        logger.warn('Failed to get online users from Redis', { error: error instanceof Error ? error.message : String(error) });
-      }
-    }
+    // Users Online: Get from Socket.IO directly (real-time, not from DB/Redis)
+    // Reuse io variable declared above
+    const usersOnline = io ? (io.engine?.clientsCount || io.sockets.sockets.size || 0) : 0;
 
     // Process day-wise charts
-    const roomsCreatedChart = getDayWiseData(thirtyDaysAgo, now, roomsCreatedLast30Days.map((r: any) => ({ date: r.createdAt })));
+    const roomsCreatedChart = getDayWiseData(thirtyDaysAgo, now, Array.isArray(roomsCreatedLast30Days) ? roomsCreatedLast30Days.map((r: any) => ({ date: r.createdAt })) : []);
     // messagesLast30Days is already aggregated by day, just need to fill missing dates
     const messagesChart = (() => {
       const dataMap = new Map<string, number>();
-      messagesLast30Days.forEach((d: any) => {
-        dataMap.set(d._id, d.count);
-      });
+      if (Array.isArray(messagesLast30Days)) {
+        messagesLast30Days.forEach((d: any) => {
+          if (d && d._id && typeof d.count === 'number') {
+            dataMap.set(d._id, d.count);
+          }
+        });
+      }
       
       const result: Array<{ date: string; count: number }> = [];
       const current = new Date(thirtyDaysAgo);
@@ -831,8 +832,8 @@ const calculateInsights = async () => {
     })();
 
     // Process vanished by admin vs auto
-    const vanishedByAdmin = vanishedByAdminVsAuto.find((v: any) => v._id && v._id !== 'auto')?.count || 0;
-    const vanishedByAuto = vanishedByAdminVsAuto.find((v: any) => v._id === 'auto' || !v._id)?.count || 0;
+    const vanishedByAdmin = Array.isArray(vanishedByAdminVsAuto) ? vanishedByAdminVsAuto.find((v: any) => v && v._id && v._id !== 'auto')?.count || 0 : 0;
+    const vanishedByAuto = Array.isArray(vanishedByAdminVsAuto) ? vanishedByAdminVsAuto.find((v: any) => v && (v._id === 'auto' || !v._id))?.count || 0 : 0;
 
     return {
       // Overview
@@ -869,9 +870,13 @@ const calculateInsights = async () => {
       usersJoinedChart: (() => {
         // Convert aggregation result to chart format and fill missing dates
         const dataMap = new Map<string, number>();
-        usersJoinedLast30Days.forEach((d: any) => {
-          dataMap.set(d._id, d.count);
-        });
+        if (Array.isArray(usersJoinedLast30Days)) {
+          usersJoinedLast30Days.forEach((d: any) => {
+            if (d && d._id && typeof d.count === 'number') {
+              dataMap.set(d._id, d.count);
+            }
+          });
+        }
         
         const result: Array<{ date: string; count: number }> = [];
         const current = new Date(thirtyDaysAgo);
@@ -910,24 +915,29 @@ const calculateInsights = async () => {
       totalStorageUsed: (totalStorageUsed[0]?.totalSize || 0) / (1024 * 1024), // Convert to MB
       storageUsedLast30Days: (storageUsedLast30Days[0]?.totalSize || 0) / (1024 * 1024), // Convert to MB
       storageByRoomStatus: {
-        active: (storageByRoomStatus.find((s: any) => s._id === 'active')?.totalSize || 0) / (1024 * 1024),
-        locked: (storageByRoomStatus.find((s: any) => s._id === 'locked')?.totalSize || 0) / (1024 * 1024),
-        'auto-vanish': (storageByRoomStatus.find((s: any) => s._id === 'auto-vanish')?.totalSize || 0) / (1024 * 1024),
-        ended: (storageByRoomStatus.find((s: any) => s._id === 'ended')?.totalSize || 0) / (1024 * 1024),
-        expired: (storageByRoomStatus.find((s: any) => s._id === 'expired')?.totalSize || 0) / (1024 * 1024)
+        active: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s && s._id === 'active')?.totalSize || 0 : 0) / (1024 * 1024),
+        locked: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s && s._id === 'locked')?.totalSize || 0 : 0) / (1024 * 1024),
+        'auto-vanish': (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s && s._id === 'auto-vanish')?.totalSize || 0 : 0) / (1024 * 1024),
+        ended: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s && s._id === 'ended')?.totalSize || 0 : 0) / (1024 * 1024),
+        expired: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s && s._id === 'expired')?.totalSize || 0 : 0) / (1024 * 1024)
       },
-      storagePerRoomTop: storagePerRoomTop.map((room: any) => ({
+      storagePerRoomTop: Array.isArray(storagePerRoomTop) ? storagePerRoomTop.map((room: any) => ({
         roomCode: room.roomCode,
         roomName: room.roomName,
         totalSize: room.totalSize / (1024 * 1024), // Convert to MB
         fileCount: room.fileCount,
         isLocked: room.isLocked,
         isEnded: room.isEnded
-      })),
+      })) : [],
       
       // System
       socketConnectionsLive,
       failedRoomJoins,
+      uploadFailuresToday: platformMetrics.uploadFailures,
+      uploadsGcsToday: platformMetrics.uploadsGcs,
+      uploadsLocalToday: platformMetrics.uploadsLocal,
+      gcsFallbackRate: platformMetrics.gcsFallbackRate,
+      uploadSuccessRate: platformMetrics.uploadSuccessRate,
       autoVanishJobsRunning,
       
       // Legacy fields for backward compatibility
@@ -939,6 +949,8 @@ const calculateInsights = async () => {
   } catch (error: any) {
     logger.error('Error calculating insights', { error: error instanceof Error ? error.message : String(error) });
     throw error;
+  } finally {
+    calculatingInsights = false;
   }
 };
 
@@ -963,6 +975,50 @@ export const emitAdminInsightUpdate = async (io: Server, event: string, data?: a
   }
 };
 
+// Periodic update interval for real-time stats (every 7 seconds)
+let periodicUpdateInterval: NodeJS.Timeout | null = null;
+const UPDATE_INTERVAL_MS = 7000; // 7 seconds (between 5-10 seconds as requested)
+
+/**
+ * Start periodic real-time updates for all admin clients
+ */
+export const startPeriodicAdminUpdates = (io: Server): void => {
+  if (periodicUpdateInterval) {
+    return; // Already running
+  }
+
+  periodicUpdateInterval = setInterval(async () => {
+    try {
+      // Get real-time users online from Socket.IO
+      const usersOnline = io ? (io.engine?.clientsCount || io.sockets.sockets.size || 0) : 0;
+      
+      // Emit lightweight real-time update (only usersOnline, not full insights)
+      io.to(ADMIN_ROOM).emit('admin:stats_update', {
+        usersOnline,
+        socketConnectionsLive: usersOnline,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error: any) {
+      logger.warn('Error in periodic admin update', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }, UPDATE_INTERVAL_MS);
+
+  logger.info('Started periodic admin stats updates', { intervalMs: UPDATE_INTERVAL_MS });
+};
+
+/**
+ * Stop periodic updates
+ */
+export const stopPeriodicAdminUpdates = (): void => {
+  if (periodicUpdateInterval) {
+    clearInterval(periodicUpdateInterval);
+    periodicUpdateInterval = null;
+    logger.info('Stopped periodic admin stats updates');
+  }
+};
+
 // Handle admin socket connections
 export const handleAdminSocketConnection = (io: Server, socket: Socket): void => {
   const adminSecret = socket.handshake.auth?.adminSecret || socket.handshake.query?.adminSecret;
@@ -979,6 +1035,9 @@ export const handleAdminSocketConnection = (io: Server, socket: Socket): void =>
   }
 
   logger.info('Admin socket connected', { socketId: socket.id });
+
+  // Start periodic updates if not already running
+  startPeriodicAdminUpdates(io);
 
   // Join admin room
   socket.join(ADMIN_ROOM);
@@ -999,6 +1058,7 @@ export const handleAdminSocketConnection = (io: Server, socket: Socket): void =>
   // Handle admin disconnect
   socket.on('disconnect', () => {
     logger.info('Admin socket disconnected', { socketId: socket.id });
+    // Note: We don't stop periodic updates on disconnect, as other admins might be connected
   });
 
   // Handle manual refresh request

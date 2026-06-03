@@ -1,5 +1,5 @@
-import { createRoom, getRoomBySlugOrCode, endRoom, removeParticipant } from '../services/roomService.js';
-import { generateUploadUrl } from '../services/gcsService.js';
+import { createRoom, getRoomByCode, getRoomBySlugOrCode, endRoom, removeParticipant } from '../services/roomService.js';
+import { generateUploadUrl, deleteRoomFiles } from '../services/gcsService.js';
 import { isFileUploadAvailable } from '../config/gcs.js';
 import { z } from 'zod';
 import { logger } from '../utils/logger.js';
@@ -7,11 +7,15 @@ import { validateFileUpload } from '../utils/validation.js';
 import { sanitizeName } from '../utils/sanitize.js';
 import { generatePairingCodeForRoom, validatePairingCode } from '../services/pairingService.js';
 import { v4 as uuidv4 } from 'uuid';
-import path from 'path';
-import fs from 'fs/promises';
+import { getIoInstance } from '../socket/ioInstance.js';
+import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
+import { RoomModel } from '../models/Room.js';
+import { MessageModel } from '../models/Message.js';
+import { ROOM_STORAGE_LIMIT_BYTES } from '../constants/roomStorage.js';
 const createRoomSchema = z.object({
     name: z.string().max(100).optional(),
     isPublic: z.boolean().optional(),
+    userId: z.string().uuid().optional(), // UUID of the room creator
 });
 const uploadUrlSchema = z.object({
     fileName: z.string().min(1),
@@ -24,15 +28,24 @@ export const createRoomHandler = async (req, res) => {
         const data = {
             name: body.name ? sanitizeName(body.name) : undefined,
             isPublic: body.isPublic || false,
+            userId: body.userId, // Pass userId to service
         };
         const room = await createRoom(data);
-        logger.info('Room created', { code: room.code, slug: room.slug });
+        logger.info('Room created', { code: room.code, slug: room.slug, ownerId: room.ownerId });
+        // Emit admin insight update
+        const io = getIoInstance();
+        if (io) {
+            emitAdminInsightUpdate(io, 'room_created', { roomCode: room.code, isPublic: room.isPublic }).catch(err => {
+                logger.warn('Failed to emit admin insight update', { error: err instanceof Error ? err.message : String(err) });
+            });
+        }
         res.json({
             code: room.code,
             token: room.token,
             slug: room.slug,
             name: room.name,
             expiresAt: room.expiresAt,
+            ownerId: room.ownerId, // Return ownerId to frontend
         });
     }
     catch (error) {
@@ -103,10 +116,17 @@ export const getRoomHandler = async (req, res) => {
             code: room.code,
             slug: room.slug,
             name: room.name,
+            ownerId: room.ownerId, // Include ownerId for RBAC
             createdAt: room.createdAt,
             expiresAt: room.expiresAt,
             participantCount: room.participants.length,
             fileUploadAvailable: isFileUploadAvailable(),
+            isLocked: room.isLocked || false,
+            lockedAt: room.lockedAt ? room.lockedAt.toISOString() : undefined,
+            storageUsed: room.storageUsed || 0,
+            storageLimitBytes: ROOM_STORAGE_LIMIT_BYTES,
+            coHostIds: room.coHostIds || [],
+            slowModeMessagesPerMinute: room.slowModeMessagesPerMinute ?? 0,
         });
     }
     catch (error) {
@@ -131,6 +151,7 @@ export const generateUploadUrlHandler = async (req, res) => {
         }
         const sanitizedFileName = validation.sanitizedFileName;
         const mimeType = validation.inferredMimeType || body.mimeType;
+        // Generate upload URL - will throw error if GCS is not configured
         const { uploadUrl, filePath } = await generateUploadUrl(code, sanitizedFileName, mimeType, body.fileSize);
         logger.debug(`Upload URL generated for room ${code}: ${body.fileName}`);
         res.json({ uploadUrl, filePath });
@@ -141,18 +162,137 @@ export const generateUploadUrlHandler = async (req, res) => {
             res.status(400).json({ error: 'Invalid request body', details: error.errors });
             return;
         }
-        // Handle GCS not configured error specifically
-        if (error instanceof Error && error.message === 'GCS not configured') {
-            logger.warn('File upload requested but GCS is not configured', { code: req.params.code });
-            res.status(503).json({ error: 'File uploads are not available. GCS storage is not configured.' });
-            return;
+        // Handle GCS configuration errors (explicit failures from generateUploadUrl)
+        if (error instanceof Error) {
+            const errorMessage = error.message;
+            // GCS not configured or initialization failed
+            if (errorMessage.includes('GCS is not configured') ||
+                errorMessage.includes('GCS client initialization') ||
+                errorMessage.includes('Missing environment variables')) {
+                logger.error('GCS upload failed - configuration error', {
+                    error: errorMessage,
+                    code: req.params.code,
+                });
+                res.status(503).json({
+                    error: errorMessage,
+                    code: 'GCS_NOT_CONFIGURED'
+                });
+                return;
+            }
+            // File size validation errors
+            if (errorMessage.includes('File size exceeds maximum')) {
+                logger.warn('File size validation failed', { error: errorMessage, code: req.params.code });
+                res.status(400).json({ error: errorMessage });
+                return;
+            }
+            // GCS API errors (signed URL generation failures)
+            if (errorMessage.includes('Failed to generate GCS upload URL')) {
+                logger.error('GCS signed URL generation failed', {
+                    error: errorMessage,
+                    code: req.params.code,
+                    stack: error.stack,
+                });
+                res.status(500).json({
+                    error: 'Failed to generate upload URL. Please check GCS configuration and credentials.',
+                    code: 'GCS_UPLOAD_URL_ERROR'
+                });
+                return;
+            }
         }
-        logger.error('Error generating upload URL:', {
+        // Unknown errors
+        logger.error('Unexpected error generating upload URL:', {
             error: error instanceof Error ? error.message : String(error),
             stack: error instanceof Error ? error.stack : undefined,
             code: req.params.code,
         });
-        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to generate upload URL' });
+        res.status(500).json({
+            error: error instanceof Error ? error.message : 'Failed to generate upload URL',
+            code: 'UNKNOWN_ERROR'
+        });
+    }
+};
+// Public upload handler - allows anyone in the room to upload files
+export const generateUploadUrlPublicHandler = async (req, res) => {
+    try {
+        const { code } = req.params;
+        // Verify room exists and is not expired
+        const room = await getRoomByCode(code);
+        if (!room) {
+            logger.warn(`Room ${code} not found for public upload`);
+            res.status(404).json({ error: 'Room not found' });
+            return;
+        }
+        if (new Date() > room.expiresAt) {
+            logger.warn(`Room ${code} expired for public upload`);
+            res.status(410).json({ error: 'Room expired' });
+            return;
+        }
+        const body = uploadUrlSchema.parse(req.body);
+        const validation = validateFileUpload(body.fileName, body.mimeType, body.fileSize);
+        if (!validation.valid) {
+            logger.warn('File validation failed', { code, error: validation.error });
+            res.status(400).json({ error: validation.error });
+            return;
+        }
+        const sanitizedFileName = validation.sanitizedFileName;
+        const mimeType = validation.inferredMimeType || body.mimeType;
+        const { uploadUrl, filePath } = await generateUploadUrl(code, sanitizedFileName, mimeType, body.fileSize);
+        logger.debug(`Public upload URL generated for room ${code}: ${body.fileName}`);
+        res.json({ uploadUrl, filePath });
+    }
+    catch (error) {
+        if (error instanceof z.ZodError) {
+            logger.warn('Invalid upload URL request body:', error.errors);
+            res.status(400).json({ error: 'Invalid request body', details: error.errors });
+            return;
+        }
+        // Handle GCS configuration errors (explicit failures from generateUploadUrl)
+        if (error instanceof Error) {
+            const errorMessage = error.message;
+            // GCS not configured or initialization failed
+            if (errorMessage.includes('GCS is not configured') ||
+                errorMessage.includes('GCS client initialization') ||
+                errorMessage.includes('Missing environment variables')) {
+                logger.error('GCS upload failed - configuration error', {
+                    error: errorMessage,
+                    code: req.params.code,
+                });
+                res.status(503).json({
+                    error: errorMessage,
+                    code: 'GCS_NOT_CONFIGURED'
+                });
+                return;
+            }
+            // File size validation errors
+            if (errorMessage.includes('File size exceeds maximum')) {
+                logger.warn('File size validation failed', { error: errorMessage, code: req.params.code });
+                res.status(400).json({ error: errorMessage });
+                return;
+            }
+            // GCS API errors (signed URL generation failures)
+            if (errorMessage.includes('Failed to generate GCS upload URL')) {
+                logger.error('GCS signed URL generation failed', {
+                    error: errorMessage,
+                    code: req.params.code,
+                    stack: error.stack,
+                });
+                res.status(500).json({
+                    error: 'Failed to generate upload URL. Please check GCS configuration and credentials.',
+                    code: 'GCS_UPLOAD_URL_ERROR'
+                });
+                return;
+            }
+        }
+        // Unknown errors
+        logger.error('Unexpected error generating public upload URL:', {
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+            code: req.params.code,
+        });
+        res.status(500).json({
+            error: error instanceof Error ? error.message : 'Failed to generate upload URL',
+            code: 'UNKNOWN_ERROR'
+        });
     }
 };
 const pairingCodeSchema = z.object({
@@ -199,54 +339,6 @@ export const validatePairingCodeHandler = async (req, res) => {
         res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to validate pairing code' });
     }
 };
-/**
- * Handle local file upload (fallback when GCS is not configured)
- */
-export const uploadLocalFileHandler = async (req, res) => {
-    try {
-        const { code } = req.params;
-        if (req.roomCode !== code) {
-            logger.warn(`Unauthorized local upload request for room ${code}`);
-            res.status(403).json({ error: 'Forbidden' });
-            return;
-        }
-        if (!req.body || !req.body.file || !req.body.fileName) {
-            res.status(400).json({ error: 'Missing file data' });
-            return;
-        }
-        const { file: fileDataUrl, fileName, mimeType } = req.body;
-        // Extract base64 data
-        const matches = fileDataUrl.match(/^data:([^;]+);base64,(.+)$/);
-        if (!matches) {
-            res.status(400).json({ error: 'Invalid file format' });
-            return;
-        }
-        const [, , base64Data] = matches;
-        const buffer = Buffer.from(base64Data, 'base64');
-        // Validate file size
-        const validation = validateFileUpload(fileName, mimeType || 'application/octet-stream', buffer.length);
-        if (!validation.valid) {
-            res.status(400).json({ error: validation.error });
-            return;
-        }
-        // Save to local storage
-        const fileId = uuidv4();
-        const sanitizedFileName = validation.sanitizedFileName;
-        const filePath = `rooms/${code}/${fileId}-${sanitizedFileName}`;
-        const fullPath = path.join(process.cwd(), 'uploads', filePath);
-        await fs.mkdir(path.dirname(fullPath), { recursive: true });
-        await fs.writeFile(fullPath, buffer);
-        logger.info(`Local file uploaded for room ${code}: ${sanitizedFileName}`);
-        res.json({ filePath, url: `/uploads/${filePath}` });
-    }
-    catch (error) {
-        logger.error('Error uploading local file', {
-            error: error instanceof Error ? error.message : String(error),
-            code: req.params.code,
-        });
-        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to upload file' });
-    }
-};
 export const endRoomHandler = async (req, res) => {
     try {
         const { code } = req.params;
@@ -291,6 +383,89 @@ export const leaveRoomHandler = async (req, res) => {
             code: req.params.code,
         });
         res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to leave room' });
+    }
+};
+/**
+ * Secure deleteRoom (Vanish) function that strictly ensures NO data is left behind.
+ * Implements Cleanup Cascade:
+ * 1. Wipe Google Cloud Storage files (rooms/{roomCode}/*)
+ * 2. Wipe Database (Messages, then Room)
+ * 3. Notify Users via Socket.IO (room_vanished event)
+ */
+export const deleteRoomHandler = async (req, res) => {
+    try {
+        const { code } = req.params; // roomCode from route parameter
+        const roomCode = code; // Using roomCode to match codebase conventions
+        if (!roomCode || typeof roomCode !== 'string') {
+            res.status(400).json({ error: 'Invalid room code' });
+            return;
+        }
+        // Verify room exists
+        const room = await getRoomByCode(roomCode);
+        if (!room) {
+            logger.warn(`[VANISH] Room ${roomCode} not found`);
+            res.status(404).json({ error: 'Room not found' });
+            return;
+        }
+        // Step 1: Identify the Storage Path
+        // Files are stored as: rooms/{roomCode}/{fileName}
+        const storagePath = `rooms/${roomCode}/`;
+        // Step 2: Wipe Google Cloud Storage
+        // Use deleteRoomFiles which handles GCS deletion with prefix matching
+        // Wrap in try/catch - fail-safe: don't let GCS error block room deletion
+        try {
+            await deleteRoomFiles(roomCode);
+            logger.info(`[VANISH] Step 2: GCS files deleted for room ${roomCode} (prefix: ${storagePath})`);
+        }
+        catch (gcsError) {
+            // Log the error but PROCEED to delete DB data (fail-safe)
+            logger.warn(`[VANISH] Step 2: GCS deletion failed for room ${roomCode} (non-critical, proceeding with DB cleanup)`, {
+                error: gcsError instanceof Error ? gcsError.message : String(gcsError),
+            });
+        }
+        // Step 3: Wipe Database
+        // Delete all messages first
+        const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
+        logger.info(`[VANISH] Step 3a: Deleted ${messageDeleteResult.deletedCount} messages from room ${roomCode}`);
+        // Delete the room itself
+        const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
+        if (roomDeleteResult.deletedCount === 0) {
+            logger.warn(`[VANISH] Step 3b: Room ${roomCode} was already deleted from database`);
+        }
+        else {
+            logger.info(`[VANISH] Step 3b: Room ${roomCode} deleted from database`);
+        }
+        // Step 4: Notify Users via Socket.IO
+        const io = getIoInstance();
+        if (io) {
+            // Emit room_vanished event to all users in that room
+            io.to(roomCode).emit('room_vanished', {
+                reason: 'Room has been permanently deleted',
+                roomId: roomCode,
+                vanishedAt: new Date().toISOString(),
+            });
+            // Force disconnect all sockets in that room
+            io.in(roomCode).disconnectSockets(true);
+            logger.info(`[VANISH] Step 4: Emitted room_vanished event and disconnected sockets for room ${roomCode}`);
+        }
+        else {
+            logger.warn(`[VANISH] Step 4: Socket.IO instance not available, skipped user notification for room ${roomCode}`);
+        }
+        // Verification Log
+        console.log(`[VANISH] Room ${roomCode} deleted. GCS Files wiped. Messages removed.`);
+        // Return success response
+        res.json({ success: true });
+    }
+    catch (error) {
+        logger.error('[VANISH] Error deleting room', {
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+            code: req.params.code,
+        });
+        res.status(500).json({
+            error: error instanceof Error ? error.message : 'Failed to delete room',
+            code: 'DELETE_ROOM_ERROR'
+        });
     }
 };
 //# sourceMappingURL=roomController.js.map

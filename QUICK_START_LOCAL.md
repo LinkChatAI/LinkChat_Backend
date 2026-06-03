@@ -35,13 +35,18 @@ Watch the logs for:
 
 ```bash
 # Check connection status
-curl http://localhost:8080/api/admin/db-status
+curl http://localhost:8081/api/admin/db-status
+
+# Auth smoke test (requires OAuth env vars in .env)
+node test-auth.mjs
 
 # Create a test room
-curl -X POST http://localhost:8080/api/rooms \
+curl -X POST http://localhost:8081/api/rooms \
   -H "Content-Type: application/json" \
   -d '{"name":"Test Room"}'
 ```
+
+**Google sign-in:** `http://localhost:8081/api/auth/google?returnTo=/` — see **`AUTH.md`**.
 
 If you get a 200 response with room data, **it's working!** 🎉
 

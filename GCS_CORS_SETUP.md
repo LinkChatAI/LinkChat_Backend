@@ -26,11 +26,13 @@ gsutil cors set cors-config.json gs://your-bucket-name
   {
     "origin": ["http://localhost:5173", "http://localhost:3000", "https://your-frontend-domain.com"],
     "method": ["PUT", "GET", "POST", "HEAD", "OPTIONS"],
-    "responseHeader": ["Content-Type", "Content-Length", "x-goog-resumable"],
+    "responseHeader": ["Content-Type", "Content-Length", "x-goog-resumable", "Location"],
     "maxAgeSeconds": 3600
   }
 ]
 ```
+
+**Important:** The `Location` header is required for resumable uploads. Without it, you'll get a 403 Forbidden error.
 
 7. Click "Save"
 

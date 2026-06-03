@@ -1,10 +1,15 @@
+export type RoomPlan = 'free' | 'premium' | 'pro' | 'enterprise';
+export type UserPlan = RoomPlan;
+
 export interface Room {
   code: string;
   token: string;
-  ownerId?: string; // userId of the room creator (for RBAC)
+  ownerId?: string; // Anonymous guest UUID of the room creator (for RBAC)
+  ownerUserId?: string; // Authenticated user MongoDB ID (for premium features)
   name?: string;
   slug?: string;
   isPublic?: boolean;
+  plan?: RoomPlan; // Subscription plan — controls feature access (e.g. video uploads)
   createdAt: Date;
   expiresAt: Date;
   participants: string[];
@@ -13,6 +18,9 @@ export interface Room {
   endedBy?: string;
   isLocked?: boolean; // Room is locked (admin left, 24h countdown)
   lockedAt?: Date; // When the room was locked
+  coHostIds?: string[];
+  slowModeMessagesPerMinute?: number;
+  storageUsed?: number; // Total storage used in bytes
 }
 
 export interface Message {
@@ -22,7 +30,7 @@ export interface Message {
   nickname: string;
   avatar?: string;
   content: string;
-  type: 'text' | 'file';
+  type: 'text' | 'file' | 'image' | 'video';
   fileMeta?: {
     name: string;
     size: number;
@@ -36,6 +44,8 @@ export interface Message {
   createdAt: Date;
   expiresAt?: Date; // TTL for auto-deletion (synced with room expiry)
   deletedByAdmin?: boolean; // Flag indicating message was deleted by admin
+  // Client-side ID for message reconciliation (echoed back from client)
+  tempId?: string; // Temporary ID sent from client, echoed back by server
 }
 
 export interface CreateRoomRequest {
@@ -43,6 +53,8 @@ export interface CreateRoomRequest {
   name?: string;
   isPublic?: boolean;
   userId?: string; // UUID of the room creator (for RBAC)
+  ownerUserId?: string; // Authenticated user ID (premium sync)
+  plan?: RoomPlan; // Subscription plan for the room
 }
 
 export interface JoinRoomRequest {

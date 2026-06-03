@@ -8,6 +8,7 @@ import { logger } from '../utils/logger.js';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
 import { createMessage } from './messageService.js';
+import { clearPendingDeletionTimer } from '../socket/handlers.js';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -29,6 +30,9 @@ export const adminVanishRoom = async (
   if (!room) {
     throw new Error(`Room ${roomCode} not found`);
   }
+
+  // 1.5. Clear any pending deletion timer (explicit vanish bypasses grace period)
+  clearPendingDeletionTimer(roomCode);
 
   // 2. Broadcast system message before deletion
   try {

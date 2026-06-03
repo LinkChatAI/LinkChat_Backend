@@ -13,7 +13,9 @@ import {
   getActiveRoomsList,
   getLockedRoomsList,
   vanishRoom,
+  getDebugStats,
 } from '../controllers/adminController.js';
+import { getContactSubmissions } from '../controllers/contactController.js';
 import { authenticateAdmin } from '../middleware/adminAuth.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
 import { auditAdminAction } from '../middleware/adminAudit.js';
@@ -140,6 +142,22 @@ router.post(
   rateLimiter('adminAction'), // 10 requests per minute for actions
   auditAdminAction('vanish_room', { roomCode: ':roomCode' }),
   vanishRoom
+);
+
+// Contact submissions endpoint (admin-only)
+router.get(
+  '/contact/submissions',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_contact_submissions'),
+  getContactSubmissions
+);
+
+// Debug endpoint for verification
+router.get(
+  '/debug-stats',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_debug_stats'),
+  getDebugStats
 );
 
 export default router;

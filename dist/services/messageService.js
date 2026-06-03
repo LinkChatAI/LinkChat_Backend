@@ -35,12 +35,45 @@ export const getRoomMessages = async (roomCode, limit = 100) => {
         .exec();
     return messages.reverse();
 };
-export const deleteMessage = async (messageId, userId) => {
+export const getMessagesAfterId = async (roomCode, lastMessageId, limit = 100) => {
+    // Validate input
+    if (!roomCode || typeof roomCode !== 'string') {
+        throw new Error('Invalid room code');
+    }
+    const maxLimit = Math.min(limit, 500); // Cap at 500 messages
+    let query = { roomCode };
+    // If lastMessageId is provided, fetch messages created after that message
+    if (lastMessageId && typeof lastMessageId === 'string' && lastMessageId.trim()) {
+        // First, find the message with the given ID to get its createdAt timestamp
+        const lastMessage = await MessageModel.findOne({ id: lastMessageId.trim(), roomCode }).lean();
+        if (lastMessage) {
+            query.createdAt = { $gt: lastMessage.createdAt };
+        }
+    }
+    const messages = await MessageModel.find(query)
+        .sort({ createdAt: 1 }) // Sort ascending to get messages in chronological order
+        .limit(maxLimit)
+        .lean()
+        .exec();
+    return messages;
+};
+export const deleteMessage = async (messageId, userId, roomOwnerId) => {
     // Validate input
     if (!messageId || typeof messageId !== 'string' || !userId || typeof userId !== 'string') {
         return false;
     }
-    const result = await MessageModel.deleteOne({ id: messageId.trim(), userId: userId.trim() });
+    // Fetch the message to check ownership
+    const message = await MessageModel.findOne({ id: messageId.trim() });
+    if (!message)
+        return false;
+    // Permission check: Allow deletion if:
+    // 1. User is deleting their own message (message.userId === userId)
+    // 2. OR user is the room owner (roomOwnerId === userId)
+    const canDelete = message.userId === userId.trim() || (roomOwnerId && roomOwnerId.trim() === userId.trim());
+    if (!canDelete) {
+        return false;
+    }
+    const result = await MessageModel.deleteOne({ id: messageId.trim() });
     return result.deletedCount > 0;
 };
 export const addReaction = async (messageId, userId, emoji) => {

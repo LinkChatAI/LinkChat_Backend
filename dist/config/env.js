@@ -38,12 +38,13 @@ const validateEnv = () => {
         logger.warn(`Missing environment variables: ${missing.join(', ')}. Some features may not work.`);
     }
     // URLs must be set via environment variables
-    const defaultBackendUrl = process.env.BACKEND_URL || '';
+    const devBackendDefault = nodeEnv === 'development' ? 'http://localhost:8080' : '';
+    const defaultBackendUrl = process.env.BACKEND_URL || devBackendDefault;
     const defaultBaseUrl = process.env.BASE_URL || process.env.FRONTEND_URL || '';
     if (!process.env.BASE_URL) {
         logger.warn('BASE_URL not set. SEO features, QR codes, and link sharing may not work correctly.');
     }
-    if (!process.env.BACKEND_URL) {
+    if (!process.env.BACKEND_URL && nodeEnv !== 'development') {
         logger.warn('BACKEND_URL not set. Some features may not work correctly.');
     }
     return {
@@ -54,7 +55,7 @@ const validateEnv = () => {
         JWT_SECRET: process.env.JWT_SECRET || 'default-secret-change-in-production',
         ROOM_CODE_LENGTH: parseInt(process.env.ROOM_CODE_LENGTH || '4', 10),
         DEFAULT_ROOM_EXP_HOURS: parseFloat(process.env.DEFAULT_ROOM_EXP_HOURS || '0.833333'), // 50 minutes default
-        MAX_FILE_SIZE_BYTES: parseInt(process.env.MAX_FILE_SIZE_BYTES || '10485760', 10), // 10MB default
+        MAX_FILE_SIZE_BYTES: parseInt(process.env.MAX_FILE_SIZE_BYTES || '314572800', 10), // 300MB default (was 10MB)
         BASE_URL: process.env.BASE_URL || defaultBaseUrl,
         BACKEND_URL: process.env.BACKEND_URL || defaultBackendUrl,
         SITE_TITLE: process.env.SITE_TITLE || 'LinkChat',
@@ -65,6 +66,7 @@ const validateEnv = () => {
         GCS_PROJECT_ID: process.env.GCS_PROJECT_ID,
         GCS_CLIENT_EMAIL: process.env.GCS_CLIENT_EMAIL,
         GCS_PRIVATE_KEY: process.env.GCS_PRIVATE_KEY,
+        ADMIN_SECRET: process.env.ADMIN_SECRET,
     };
 };
 export const env = validateEnv();

@@ -17,6 +17,8 @@ interface EnvConfig {
     GCS_PROJECT_ID?: string;
     GCS_CLIENT_EMAIL?: string;
     GCS_PRIVATE_KEY?: string;
+    GOOGLE_API_KEY?: string;
+    ADMIN_SECRET?: string;
 }
 export declare const env: EnvConfig;
 export {};

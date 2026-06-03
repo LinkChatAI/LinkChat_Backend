@@ -18,11 +18,25 @@ const ALLOWED_MIME_TYPES = [
     'application/vnd.ms-powerpoint',
     'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     'text/plain',
+    'text/html',
     'text/csv',
+    'text/xml',
+    'application/xml',
+    // JSON files
+    'application/json',
+    'text/json',
     // Archives
     'application/zip',
     'application/x-zip-compressed',
     'application/x-rar-compressed',
+    'application/vnd.rar',
+    // Executables
+    'application/x-msdownload', // .exe files
+    // Subtitle files
+    'application/x-subrip', // .srt files
+    // CRITICAL: Universal fallback for binary files to prevent Google Cloud signature mismatches
+    // This is required for RAR, ZIP, SRT, EXE, and other binary files that browsers may send as octet-stream
+    'application/octet-stream',
     // Audio/Video
     'audio/mpeg',
     'audio/wav',
@@ -85,24 +99,45 @@ const inferMimeTypeFromExtension = (fileName) => {
         'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'ppt': 'application/vnd.ms-powerpoint',
         'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        'txt': 'text/plain', 'csv': 'text/csv',
+        'txt': 'text/plain', 'html': 'text/html', 'htm': 'text/html', 'csv': 'text/csv', 'xml': 'text/xml',
+        'json': 'application/json',
         // Archives
         'zip': 'application/zip', 'rar': 'application/x-rar-compressed',
+        // Executables
+        'exe': 'application/x-msdownload',
+        // Subtitle files
+        'srt': 'application/x-subrip',
         // Audio/Video
         'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'mp4': 'video/mp4', 'webm': 'video/webm',
     };
     return mimeMap[ext] || null;
 };
 export const validateMimeType = (mimeType, fileName) => {
-    // If MIME type is empty or the generic fallback, try to infer from filename
-    if ((!mimeType || mimeType === 'application/octet-stream') && fileName) {
+    // CRITICAL: If application/octet-stream is explicitly provided, use it as-is
+    // This is our intentional "universal fallback" for binary files to prevent signature mismatches
+    // Do NOT infer a different type, as that would cause the signed URL to use a different Content-Type
+    // than what the browser will send, resulting in 403 Forbidden errors
+    if (mimeType === 'application/octet-stream') {
+        // Use the provided type directly - don't infer
+        // This ensures the signed URL matches what the browser will send
+    }
+    else if (!mimeType && fileName) {
+        // Only infer if MIME type is empty (not provided)
         const inferred = inferMimeTypeFromExtension(fileName);
         if (inferred && ALLOWED_MIME_TYPES.includes(inferred)) {
             return { valid: true, inferredMimeType: inferred };
         }
     }
     // Validate provided MIME type
-    if (!mimeType || !ALLOWED_MIME_TYPES.includes(mimeType)) {
+    // We allow the type IF:
+    // 1. It's in the allowed list, OR
+    // 2. It starts with 'image/', 'video/', or 'audio/' (browsers handle these well), OR
+    // 3. It's 'application/octet-stream' (universal fallback for binary files)
+    const isAllowed = mimeType && (ALLOWED_MIME_TYPES.includes(mimeType) ||
+        mimeType.startsWith('image/') ||
+        mimeType.startsWith('video/') ||
+        mimeType.startsWith('audio/'));
+    if (!isAllowed) {
         return {
             valid: false,
             error: `File type ${mimeType || 'unknown'} is not allowed. Allowed types: images, documents, archives, audio/video.`,
@@ -134,11 +169,18 @@ export const sanitizeFilename = (filename) => {
 };
 /**
  * Validate and sanitize file upload data
+ * NOTE: File size validation should be done separately before calling this function
+ * (size limits vary by file type - videos can be larger than images)
  */
 export const validateFileUpload = (fileName, mimeType, fileSize) => {
-    const sizeValidation = validateFileSize(fileSize);
-    if (!sizeValidation.valid) {
-        return sizeValidation;
+    // File size validation is now done in fileController.ts with type-specific limits
+    // (videos: 500MB, images: 25MB, others: 300MB)
+    // We only validate that size > 0 here
+    if (fileSize <= 0) {
+        return {
+            valid: false,
+            error: 'File size must be greater than 0',
+        };
     }
     const mimeValidation = validateMimeType(mimeType, fileName);
     if (!mimeValidation.valid) {

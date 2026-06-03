@@ -4,21 +4,47 @@ import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { connectDatabase } from './config/database.js';
 import { closeRedis } from './config/redis.js';
 import { handleSocketConnection } from './socket/handlers.js';
 import roomRoutes from './routes/roomRoutes.js';
 import seoRoutes from './routes/seoRoutes.js';
+import nicknameRoutes from './routes/nicknameRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
+import contactRoutes from './routes/contactRoutes.js';
+import fileRoutes from './routes/fileRoutes.js';
+import linkPreviewRoutes from './routes/linkPreviewRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startCleanupJob } from './services/cleanupService.js';
 import { logger } from './utils/logger.js';
 import { env } from './config/env.js';
 const PORT = parseInt(process.env.PORT || '8080', 10);
+// CORS origin configuration - locked down to specific frontend URL
+const getCorsOrigin = () => {
+    const frontendUrl = env.FRONTEND_URL || env.BASE_URL;
+    // Require frontend URL to be set - no permissive fallbacks
+    if (!frontendUrl) {
+        const errorMsg = 'FRONTEND_URL or BASE_URL must be set in environment variables for CORS configuration';
+        logger.error(errorMsg);
+        throw new Error(errorMsg);
+    }
+    // Support comma-separated list of origins (for multiple environments)
+    if (frontendUrl.includes(',')) {
+        const origins = frontendUrl.split(',').map(url => url.trim()).filter(Boolean);
+        logger.info(`CORS configured for multiple origins: ${origins.join(', ')}`);
+        return origins;
+    }
+    logger.info(`CORS configured for frontend: ${frontendUrl}`);
+    return frontendUrl;
+};
+const corsOrigin = getCorsOrigin();
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: env.FRONTEND_URL || env.BASE_URL,
+        origin: corsOrigin,
         methods: ['GET', 'POST'],
         credentials: true,
     },
@@ -27,16 +53,69 @@ const io = new Server(httpServer, {
     transports: ['websocket', 'polling'],
     maxHttpBufferSize: 15 * 1024 * 1024, // 15MB to accommodate 10MB files after base64 encoding (~33% overhead)
 });
+// Export io instance for use in other modules
+import { setIoInstance } from './socket/ioInstance.js';
+setIoInstance(io);
 // CORS configuration
 app.use(cors({
-    origin: env.FRONTEND_URL || env.BASE_URL,
+    origin: corsOrigin,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-secret'],
 }));
+// Security headers (hides "Powered by Express" and adds security headers)
+app.use(helmet());
+// Global rate limiter (for general routes)
+// Allow 100 requests per 15 minutes per IP
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100,
+    message: { error: "Too many requests from this IP, please try again later." },
+    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+// Apply global limiter to all API routes
+app.use('/api', globalLimiter);
+// Strict rate limiter — room creation only (low limit, prevents mass room spam)
+// 10 room creations per hour per IP
+const roomCreationLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 10,
+    message: { error: "You are doing that too much. Chill for a bit." },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+// File upload rate limiter — more lenient, normal chat usage sends many files
+// 100 upload URL requests per 15 minutes per IP
+const uploadLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100,
+    message: { error: "Too many file uploads. Please slow down." },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+// Apply limits to specific heavy routes
+// Room creation (POST /api/rooms)
+app.post('/api/rooms', roomCreationLimiter);
+// File upload URL generation
+app.use('/api/files/get-upload-url', uploadLimiter);
 // Body parser with size limits
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Handle local file uploads (PUT requests to /api/uploads/*) - must be before static file serving
+app.use('/api/uploads', express.raw({
+    limit: env.MAX_FILE_SIZE_BYTES + 1024,
+    type: '*/*'
+}), async (req, res, next) => {
+    // Only handle PUT requests for file uploads
+    if (req.method === 'PUT') {
+        const { uploadFileHandler } = await import('./controllers/uploadController.js');
+        await uploadFileHandler(req, res);
+    }
+    else {
+        next();
+    }
+});
 // Serve uploaded files (local fallback)
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -141,12 +220,34 @@ app.post('/api/admin/reconnect-db', async (req, res) => {
 app.use('/', seoRoutes);
 // API routes
 app.use('/api/rooms', roomRoutes);
+app.use('/api/nickname', nicknameRoutes);
+app.use('/api/contact', contactRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/files', fileRoutes);
+// Link preview (OG cards) with rate limit
+const linkPreviewLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    message: { error: 'Too many link preview requests. Please slow down.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use('/api/link-preview', linkPreviewLimiter, linkPreviewRoutes);
 app.use(errorHandler);
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
     logger.debug('Socket connected', { socketId: socket.id });
-    handleSocketConnection(io, socket);
+    // Check if this is an admin connection
+    const adminSecret = socket.handshake.auth?.adminSecret || socket.handshake.query?.adminSecret;
+    if (adminSecret && adminSecret === env.ADMIN_SECRET) {
+        const { handleAdminSocketConnection } = await import('./socket/adminHandlers.js');
+        handleAdminSocketConnection(io, socket);
+    }
+    else {
+        handleSocketConnection(io, socket);
+    }
 });
 let cleanupJobInterval = null;
+let autoVanishInterval = null;
 const startServer = () => {
     // Start server immediately - don't wait for anything
     // This ensures Cloud Run health checks pass
@@ -192,6 +293,20 @@ const startServer = () => {
         });
         // Don't exit - server can still run
     }
+    // Start auto-vanish worker (non-blocking)
+    (async () => {
+        try {
+            const { startAutoVanishWorker } = await import('./services/autoVanishService.js');
+            autoVanishInterval = startAutoVanishWorker();
+            logger.info('Auto-vanish worker started');
+        }
+        catch (error) {
+            logger.error('Failed to start auto-vanish worker', {
+                error: error instanceof Error ? error.message : String(error)
+            });
+            // Don't exit - server can still run
+        }
+    })();
 };
 // Graceful shutdown
 const shutdown = async (signal) => {
@@ -204,6 +319,9 @@ const shutdown = async (signal) => {
     });
     if (cleanupJobInterval) {
         clearInterval(cleanupJobInterval);
+    }
+    if (autoVanishInterval) {
+        clearInterval(autoVanishInterval);
     }
     try {
         await closeRedis();

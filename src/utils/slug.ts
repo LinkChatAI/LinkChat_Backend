@@ -1,3 +1,6 @@
+/** Room URL slug prefix (matches marketing routes like /linkchat-create-room) */
+export const LINKCHAT_SLUG_PREFIX = 'linkchat';
+
 /**
  * Generate a URL-safe slug from a string
  */
@@ -10,19 +13,29 @@ export const generateSlug = (text: string): string => {
     .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
 };
 
-/**
- * Generate a unique slug by appending a random suffix
- */
-export const generateUniqueSlug = (baseSlug: string, code: string): string => {
-  const cleanBase = generateSlug(baseSlug);
-  if (!cleanBase) {
-    return code;
+/** Avoid double prefix when the room name already starts with "linkchat" */
+const stripLinkchatPrefix = (slugPart: string): string => {
+  if (!slugPart) return '';
+  if (slugPart === LINKCHAT_SLUG_PREFIX) return '';
+  if (slugPart.startsWith(`${LINKCHAT_SLUG_PREFIX}-`)) {
+    return slugPart.slice(LINKCHAT_SLUG_PREFIX.length + 1);
   }
-  return `${cleanBase}-${code}`;
+  return slugPart;
 };
 
 /**
- * Extract room code from a slug (e.g., "team-sync-8321" -> "8321")
+ * Generate a unique room slug: linkchat-{name}-{code} or linkchat-{code}
+ */
+export const generateUniqueSlug = (baseSlug: string, code: string): string => {
+  const cleanBase = stripLinkchatPrefix(generateSlug(baseSlug));
+  if (!cleanBase) {
+    return `${LINKCHAT_SLUG_PREFIX}-${code}`;
+  }
+  return `${LINKCHAT_SLUG_PREFIX}-${cleanBase}-${code}`;
+};
+
+/**
+ * Extract room code from a slug (e.g., "linkchat-team-sync-8321" -> "8321")
  */
 export const extractCodeFromSlug = (slug: string): string | null => {
   const match = slug.match(/-(\d+)$/);

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+import dns from 'node:dns';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 
@@ -10,6 +11,13 @@ const __dirname = dirname(__filename);
 dotenv.config({ path: resolve(__dirname, '.env') });
 
 const MONGO_URI = process.env.MONGO_URI || '';
+
+// Same DNS fix as backend/src/config/database.ts (Windows SRV lookup)
+if (MONGO_URI.startsWith('mongodb+srv://')) {
+  dns.setDefaultResultOrder('ipv4first');
+  const custom = process.env.MONGO_DNS_SERVERS?.split(',').map((s) => s.trim()).filter(Boolean);
+  dns.setServers(custom?.length ? custom : ['8.8.8.8', '1.1.1.1']);
+}
 
 console.log('=== MongoDB Connection Test ===\n');
 

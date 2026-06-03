@@ -62,11 +62,22 @@ export const cleanupExpiredRooms = async () => {
         logger.error('Error cleaning up expired rooms', { error: error instanceof Error ? error.message : String(error) });
     }
 };
+// DEPRECATED: Use autoVanishService.processAutoVanish() instead
+// This function is kept for backward compatibility but auto-vanish is now handled
+// by the dedicated auto-vanish worker service
+export const cleanupLockedRooms = async () => {
+    // Auto-vanish is now handled by autoVanishService
+    // This function is kept for backward compatibility but does nothing
+    logger.debug('cleanupLockedRooms is deprecated, auto-vanish handled by autoVanishService');
+};
 export const startCleanupJob = () => {
     logger.info('Starting cleanup job', { intervalMs: CLEANUP_INTERVAL_MS });
+    // Run cleanup immediately
     cleanupExpiredRooms();
+    // Note: cleanupLockedRooms is deprecated, auto-vanish handled by autoVanishService
     return setInterval(() => {
         cleanupExpiredRooms();
+        // Note: cleanupLockedRooms is deprecated, auto-vanish handled by autoVanishService
     }, CLEANUP_INTERVAL_MS);
 };
 //# sourceMappingURL=cleanupService.js.map
