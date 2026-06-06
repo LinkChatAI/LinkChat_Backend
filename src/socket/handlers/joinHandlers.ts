@@ -255,6 +255,7 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         ownerId: activeRoom.ownerId,
         coHostIds: activeRoom.coHostIds || [],
         slowModeMessagesPerMinute: activeRoom.slowModeMessagesPerMinute ?? 0,
+        participantsCanSend: activeRoom.participantsCanSend !== false,
         screenShare: getScreenSharePublicState(code),
         storageUsed: activeRoom.storageUsed || 0,
         storageLimitBytes: getStorageLimitForPlan(activeRoom.plan as string | undefined),

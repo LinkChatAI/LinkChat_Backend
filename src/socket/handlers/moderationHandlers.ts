@@ -56,6 +56,7 @@ export const registerModerationHandlers = (ctx: HandlerContext): void => {
         ownerId: room?.ownerId,
         coHostIds: room?.coHostIds || [],
         slowModeMessagesPerMinute: room?.slowModeMessagesPerMinute ?? 0,
+        participantsCanSend: room?.participantsCanSend !== false,
       });
     } catch (error) {
       emitErrorAlert(error, 'Failed to list participants');

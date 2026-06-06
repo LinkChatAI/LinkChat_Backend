@@ -20,6 +20,7 @@ const RoomSchema = new Schema<IRoom>(
     lockedAt: { type: Date, index: true }, // When the room was locked
     coHostIds: { type: [String], default: [] }, // Partial admin powers (mute, kick, etc.)
     slowModeMessagesPerMinute: { type: Number, default: 0 }, // 0 = off
+    participantsCanSend: { type: Boolean, default: true }, // false = host/co-hosts only
     storageUsed: { type: Number, default: 0 }, // Total storage used in bytes
     plan: {
       type: String,

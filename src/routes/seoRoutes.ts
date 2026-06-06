@@ -5,24 +5,65 @@ import { logger } from '../utils/logger.js';
 
 const router = Router();
 
+/** Static marketing/content URLs for sitemap (keep in sync with frontend routes) */
+const STATIC_SEO_PATHS: { path: string; changefreq: string; priority: string }[] = [
+  { path: '/', changefreq: 'daily', priority: '1.0' },
+  { path: '/create', changefreq: 'daily', priority: '0.8' },
+  { path: '/join', changefreq: 'daily', priority: '0.8' },
+  { path: '/linkchat-about', changefreq: 'monthly', priority: '0.6' },
+  { path: '/linkchat-how-it-works', changefreq: 'monthly', priority: '0.6' },
+  { path: '/linkchat-pricing', changefreq: 'monthly', priority: '0.7' },
+  { path: '/linkchat-contact', changefreq: 'yearly', priority: '0.4' },
+  { path: '/linkchat-create-room', changefreq: 'daily', priority: '0.8' },
+  { path: '/linkchat-join-room', changefreq: 'daily', priority: '0.8' },
+  { path: '/blog', changefreq: 'weekly', priority: '0.7' },
+  { path: '/tools', changefreq: 'weekly', priority: '0.7' },
+  { path: '/tools/chat-link-generator', changefreq: 'weekly', priority: '0.8' },
+  { path: '/tools/website-engagement-tester', changefreq: 'weekly', priority: '0.7' },
+  { path: '/tools/support-response-time-calculator', changefreq: 'weekly', priority: '0.7' },
+  { path: '/linkchat-iran-war', changefreq: 'daily', priority: '0.7' },
+  { path: '/linkchat-rivian-r2', changefreq: 'weekly', priority: '0.7' },
+  { path: '/linkchat-jp', changefreq: 'monthly', priority: '0.7' },
+  // Blog posts
+  { path: '/blog/chatgpt-alternative-for-group-chat', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/create-free-temporary-chat-room', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/secure-private-chat-without-signup', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/chat-rooms-for-teams-and-events', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/qr-code-chat-rooms-explained', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/why-ephemeral-chat-is-better', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/free-instant-file-sharing-without-account', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/best-chat-apps-no-phone-number-2026', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/linkchat-vs-whatsapp-telegram-discord-slack', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/add-chat-widget-to-shopify-5-minutes', changefreq: 'monthly', priority: '0.7' },
+  { path: '/blog/lightweight-chat-for-nextjs', changefreq: 'monthly', priority: '0.7' },
+  { path: '/blog/securing-client-communications-freelancers', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/whatsapp-link-generator-shopify-ecommerce', changefreq: 'monthly', priority: '0.7' },
+  { path: '/blog/whatsapp-link-generator-prefilled-message', changefreq: 'monthly', priority: '0.7' },
+  { path: '/blog/click-to-chat-link-business-card', changefreq: 'monthly', priority: '0.7' },
+  { path: '/blog/temporary-chat-room-no-signup', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/secure-anonymous-chat-link-generator', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/add-live-chat-react-app', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/free-live-chat-wordpress', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/line-chat-link-generator-japan', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/ichiji-chat-room-musen-toroku', changefreq: 'monthly', priority: '0.6' },
+  { path: '/blog/google-gemni-gemini-ai-chat-free-alternative', changefreq: 'weekly', priority: '0.7' },
+  { path: '/blog/rivian-r2-2026-price-specs-release', changefreq: 'weekly', priority: '0.7' },
+  { path: '/blog/gta-6-release-date-map-lucia-price-delay', changefreq: 'weekly', priority: '0.7' },
+  { path: '/blog/2024-nissan-gtr-mclaren-senna-gtr-supercars', changefreq: 'weekly', priority: '0.6' },
+  { path: '/blog/us-iran-war-news-live-discussion-chat', changefreq: 'daily', priority: '0.7' },
+  { path: '/blog/seo-services-free-tools-agency-chat', changefreq: 'monthly', priority: '0.6' },
+];
+
 // Sitemap.xml
 router.get('/sitemap.xml', async (req: Request, res: Response): Promise<void> => {
   try {
     const publicRooms = await getPublicRooms(100);
     const baseUrl = env.BASE_URL;
 
-    const urls = [
-      `<url><loc>${baseUrl}/</loc><changefreq>daily</changefreq><priority>1.0</priority></url>`,
-      `<url><loc>${baseUrl}/create</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-      `<url><loc>${baseUrl}/join</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-      `<url><loc>${baseUrl}/linkchat-about</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>`,
-      `<url><loc>${baseUrl}/linkchat-how-it-works</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>`,
-      `<url><loc>${baseUrl}/linkchat-pricing</loc><changefreq>monthly</changefreq><priority>0.7</priority></url>`,
-      `<url><loc>${baseUrl}/linkchat-contact</loc><changefreq>yearly</changefreq><priority>0.4</priority></url>`,
-      `<url><loc>${baseUrl}/linkchat-create-room</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-      `<url><loc>${baseUrl}/linkchat-join-room</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-      `<url><loc>${baseUrl}/blog</loc><changefreq>weekly</changefreq><priority>0.7</priority></url>`,
-    ];
+    const urls = STATIC_SEO_PATHS.map(
+      ({ path, changefreq, priority }) =>
+        `<url><loc>${baseUrl}${path}</loc><changefreq>${changefreq}</changefreq><priority>${priority}</priority></url>`
+    );
 
     publicRooms.forEach((room) => {
       const path = room.slug || room.code;

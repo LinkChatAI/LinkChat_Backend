@@ -170,6 +170,7 @@ export const getRoomHandler = async (req: Request, res: Response): Promise<void>
       storageLimitBytes: getStorageLimitForPlan(room.plan as string | undefined),
       coHostIds: room.coHostIds || [],
       slowModeMessagesPerMinute: room.slowModeMessagesPerMinute ?? 0,
+      participantsCanSend: room.participantsCanSend !== false,
     });
   } catch (error: any) {
     logger.error('Error getting room', { error: error instanceof Error ? error.message : String(error) });

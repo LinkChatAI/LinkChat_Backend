@@ -20,6 +20,7 @@ export interface Room {
   lockedAt?: Date; // When the room was locked
   coHostIds?: string[];
   slowModeMessagesPerMinute?: number;
+  participantsCanSend?: boolean; // false = only host/co-hosts can send
   storageUsed?: number; // Total storage used in bytes
 }
 

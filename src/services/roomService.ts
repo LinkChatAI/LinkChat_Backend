@@ -401,6 +401,27 @@ export const setRoomSlowMode = async (
   return room.toObject();
 };
 
+export const setParticipantsCanSend = async (
+  code: string,
+  canSend: boolean,
+): Promise<Room> => {
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('Database connection not available');
+  }
+
+  const room = await RoomModel.findOneAndUpdate(
+    { code },
+    { participantsCanSend: canSend },
+    { new: true },
+  );
+
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  return room.toObject();
+};
+
 export const lockRoom = async (code: string): Promise<Room> => {
   if (mongoose.connection.readyState !== 1) {
     logger.error('Database not connected when locking room');

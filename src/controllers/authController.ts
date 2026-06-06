@@ -97,7 +97,8 @@ export const googleCallbackHandler = async (req: UserAuthRequest, res: Response)
 
 export const getMeHandler = async (req: UserAuthRequest, res: Response): Promise<void> => {
   if (!req.user) {
-    res.status(401).json({ error: 'Not authenticated', code: 'AUTH_REQUIRED' });
+    // No session — 200 avoids noisy 401 console errors for anonymous visitors
+    res.status(200).json(null);
     return;
   }
 
@@ -120,7 +121,8 @@ export const getMeHandler = async (req: UserAuthRequest, res: Response): Promise
 export const refreshHandler = async (req: UserAuthRequest, res: Response): Promise<void> => {
   const refreshToken = req.cookies?.lc_refresh_token;
   if (!refreshToken) {
-    res.status(401).json({ error: 'No refresh token', code: 'AUTH_REQUIRED' });
+    // No refresh cookie — guest user; 200 keeps the browser console clean
+    res.status(200).json({ user: null });
     return;
   }
 

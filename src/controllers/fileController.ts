@@ -1,9 +1,11 @@
 import { Request, Response } from 'express';
+import path from 'path';
+import fs from 'fs';
 import { getBucket } from '../config/gcs.js';
 import { env } from '../config/env.js';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger.js';
-import { validateFileUpload } from '../utils/validation.js';
+import { validateFileUpload, sanitizeFilename } from '../utils/validation.js';
 import { z } from 'zod';
 import { RoomModel } from '../models/Room.js';
 import {
@@ -32,8 +34,17 @@ const getUploadUrlSchema = z.object({
 const MAX_IMAGE_SIZE_BYTES = 25 * 1024 * 1024;
 const MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024;
 const MAX_GENERAL_SIZE_BYTES = 300 * 1024 * 1024;
+const LOCAL_UPLOAD_DIR = path.join(process.cwd(), 'uploads');
 
 const getBackendUrl = (): string => env.BACKEND_URL || 'http://localhost:8080';
+
+const setAttachmentHeaders = (res: Response, fileName: string): void => {
+  const safeName = sanitizeFilename(fileName);
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`
+  );
+};
 
 type StorageReserveResult =
   | { ok: true }
@@ -233,5 +244,73 @@ export const getUploadUrlHandler = async (req: Request, res: Response): Promise<
       error: error instanceof Error ? error.message : 'Failed to generate upload URL',
       code: 'UNKNOWN_ERROR',
     });
+  }
+};
+
+/**
+ * GET /api/files/download?path=rooms/CODE/id-name.pdf&name=file.pdf
+ * Streams a file with Content-Disposition: attachment (forces download on tap).
+ */
+export const downloadFileHandler = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const storagePath = String(req.query.path || '');
+    const fileName = String(req.query.name || 'download');
+
+    if (!storagePath || storagePath.includes('..')) {
+      res.status(400).json({ error: 'Invalid file path' });
+      return;
+    }
+
+    setAttachmentHeaders(res, fileName);
+
+    const bucket = getBucket();
+    const gcsHealthy = bucket ? await probeGcsHealth() : false;
+
+    if (bucket && gcsHealthy) {
+      const file = bucket.file(storagePath);
+      const [exists] = await file.exists();
+      if (!exists) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+      }
+
+      const [metadata] = await file.getMetadata();
+      if (metadata.contentType) {
+        res.setHeader('Content-Type', metadata.contentType);
+      }
+
+      file
+        .createReadStream()
+        .on('error', (err) => {
+          logger.error('GCS download stream error', {
+            error: err instanceof Error ? err.message : String(err),
+            storagePath,
+          });
+          if (!res.headersSent) res.status(500).json({ error: 'Failed to download file' });
+        })
+        .pipe(res);
+      return;
+    }
+
+    const fullPath = path.join(LOCAL_UPLOAD_DIR, storagePath);
+    const normalizedPath = path.normalize(fullPath);
+    if (!normalizedPath.startsWith(path.normalize(LOCAL_UPLOAD_DIR))) {
+      res.status(403).json({ error: 'Invalid file path' });
+      return;
+    }
+
+    if (!fs.existsSync(normalizedPath)) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+
+    res.sendFile(normalizedPath);
+  } catch (error: unknown) {
+    logger.error('Download file error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to download file' });
+    }
   }
 };

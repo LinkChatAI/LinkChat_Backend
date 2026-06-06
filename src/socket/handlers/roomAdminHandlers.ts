@@ -4,6 +4,7 @@ import {
   addRoomCoHost,
   removeRoomCoHost,
   setRoomSlowMode,
+  setParticipantsCanSend,
 } from '../../services/roomService.js';
 import { canManageRoom, canModerateRoom } from '../../services/roomPermissionService.js';
 import { logger } from '../../utils/logger.js';
@@ -15,6 +16,7 @@ const emitRoomSettings = (io: HandlerContext['io'], roomCode: string, room: Room
     ownerId: room.ownerId,
     coHostIds: room.coHostIds || [],
     slowModeMessagesPerMinute: room.slowModeMessagesPerMinute ?? 0,
+    participantsCanSend: room.participantsCanSend !== false,
   });
 };
 
@@ -123,6 +125,27 @@ export const registerRoomAdminHandlers = (ctx: HandlerContext): void => {
       });
     } catch {
       socket.emit('error', { message: 'Failed to update slow mode' });
+    }
+  });
+
+  socket.on('updateParticipantsCanSend', async (data: { canSend: boolean }) => {
+    if (!ensureUserInRoom() || data?.canSend === undefined) return;
+    const authUserId = socket.handshake.auth?.userId || user.userId;
+    const room = await getRoomByCode(user.roomCode);
+    if (!canManageRoom(room, authUserId)) {
+      socket.emit('error_unauthorized', { message: 'Only the host can change messaging permissions' });
+      return;
+    }
+
+    try {
+      const updated = await setParticipantsCanSend(user.roomCode, !!data.canSend);
+      emitRoomSettings(io, user.roomCode, updated);
+      io.to(user.roomCode).emit('participantsCanSendUpdated', {
+        roomId: user.roomCode,
+        canSend: updated.participantsCanSend !== false,
+      });
+    } catch {
+      socket.emit('error', { message: 'Failed to update messaging permissions' });
     }
   });
 };

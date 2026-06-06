@@ -93,6 +93,16 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
         return;
       }
 
+      if (
+        room?.participantsCanSend === false &&
+        !canModerateRoom(room, authUserId)
+      ) {
+        const errorMsg = 'Only the host and co-hosts can send messages right now.';
+        socket.emit('error_alert', { message: errorMsg });
+        if (ack) ack({ success: false, error: errorMsg });
+        return;
+      }
+
       const slowLimit = room?.slowModeMessagesPerMinute ?? 0;
       if (
         slowLimit > 0 &&
