@@ -76,7 +76,11 @@ export const generateLocalUploadUrl = async (
   await ensureUploadDir();
   const fileId = uuidv4();
   const filePath = `rooms/${roomCode}/${fileId}-${fileName}`;
-  const uploadUrl = `${getBackendUrl()}/api/uploads/${encodeURIComponent(filePath)}`;
+  // Encode each segment only — do NOT encode slashes (encodeURIComponent on full path breaks Express routing)
+  const uploadUrl = `${getBackendUrl()}/api/uploads/${filePath
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')}`;
   return { uploadUrl, filePath };
 };
 

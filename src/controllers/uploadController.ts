@@ -5,28 +5,36 @@ import { logger } from '../utils/logger.js';
 
 const LOCAL_UPLOAD_DIR = path.join(process.cwd(), 'uploads');
 
+/** Resolve storage-relative path from PUT /api/uploads/... (mounted or full path). */
+const resolveUploadRelativePath = (req: Request): string | null => {
+  // Mounted at /api/uploads → req.path is e.g. /rooms/CODE/id-name.pdf
+  // Legacy URLs may still include /api/uploads/ prefix
+  const candidates = [req.path, req.url.split('?')[0]];
+  const uploadPrefix = '/api/uploads/';
+
+  for (const raw of candidates) {
+    if (!raw) continue;
+    let relative = raw;
+    if (relative.startsWith(uploadPrefix)) {
+      relative = relative.slice(uploadPrefix.length);
+    } else if (relative.startsWith('/')) {
+      relative = relative.slice(1);
+    }
+    if (relative && !relative.includes('..')) {
+      return decodeURIComponent(relative);
+    }
+  }
+  return null;
+};
+
 export const uploadFileHandler = async (req: Request, res: Response): Promise<void> => {
   try {
-    // Extract file path from the request URL
-    // The URL is like /api/uploads/rooms/1234/file-id-filename.jpg
-    const urlPath = req.path;
-    const uploadPrefix = '/api/uploads/';
-    
-    if (!urlPath.startsWith(uploadPrefix)) {
+    const decodedFilePath = resolveUploadRelativePath(req);
+
+    if (!decodedFilePath) {
       res.status(400).json({ error: 'Invalid upload path' });
       return;
     }
-    
-    // Extract the file path after /api/uploads/
-    const filePath = urlPath.substring(uploadPrefix.length);
-    
-    if (!filePath) {
-      res.status(400).json({ error: 'File path is required' });
-      return;
-    }
-
-    // Decode the file path (it's URL encoded)
-    const decodedFilePath = decodeURIComponent(filePath);
     
     // Ensure the file path is within the uploads directory (security)
     const fullPath = path.join(LOCAL_UPLOAD_DIR, decodedFilePath);
