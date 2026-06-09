@@ -1,25 +1,22 @@
 import { Router } from 'express';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { getRoomBySlugOrCode, getPublicRooms } from '../services/roomService.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 const router = Router();
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const STATIC_SEO_PATHS = JSON.parse(readFileSync(join(__dirname, '../data/sitemap-static-paths.json'), 'utf-8'));
 // Sitemap.xml
 router.get('/sitemap.xml', async (req, res) => {
     try {
         const publicRooms = await getPublicRooms(100);
         const baseUrl = env.BASE_URL;
-        const urls = [
-            `<url><loc>${baseUrl}/</loc><changefreq>daily</changefreq><priority>1.0</priority></url>`,
-            `<url><loc>${baseUrl}/create</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-            `<url><loc>${baseUrl}/join</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-            `<url><loc>${baseUrl}/linkchat-about</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>`,
-            `<url><loc>${baseUrl}/linkchat-how-it-works</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>`,
-            `<url><loc>${baseUrl}/linkchat-pricing</loc><changefreq>monthly</changefreq><priority>0.7</priority></url>`,
-            `<url><loc>${baseUrl}/linkchat-contact</loc><changefreq>yearly</changefreq><priority>0.4</priority></url>`,
-            `<url><loc>${baseUrl}/linkchat-create-room</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-            `<url><loc>${baseUrl}/linkchat-join-room</loc><changefreq>daily</changefreq><priority>0.8</priority></url>`,
-            `<url><loc>${baseUrl}/blog</loc><changefreq>weekly</changefreq><priority>0.7</priority></url>`,
-        ];
+        const urls = STATIC_SEO_PATHS.map(({ path, changefreq, priority, lastmod }) => {
+            const lastmodTag = lastmod ? `<lastmod>${lastmod}</lastmod>` : '';
+            return `<url><loc>${baseUrl}${path}</loc>${lastmodTag}<changefreq>${changefreq}</changefreq><priority>${priority}</priority></url>`;
+        });
         publicRooms.forEach((room) => {
             const path = room.slug || room.code;
             urls.push(`<url><loc>${baseUrl}/r/${path}</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>`);

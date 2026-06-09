@@ -2,7 +2,8 @@ import mongoose, { Schema } from 'mongoose';
 const RoomSchema = new Schema({
     code: { type: String, required: true, unique: true, index: true },
     token: { type: String, required: true },
-    ownerId: { type: String, index: true }, // userId of the room creator (for RBAC)
+    ownerId: { type: String, index: true }, // Anonymous guest UUID of the room creator (for RBAC)
+    ownerUserId: { type: String, index: true, sparse: true }, // Authenticated user ID (premium sync)
     name: { type: String, index: true },
     slug: { type: String, unique: true, sparse: true, index: true },
     isPublic: { type: Boolean, default: false, index: true },
@@ -16,7 +17,13 @@ const RoomSchema = new Schema({
     lockedAt: { type: Date, index: true }, // When the room was locked
     coHostIds: { type: [String], default: [] }, // Partial admin powers (mute, kick, etc.)
     slowModeMessagesPerMinute: { type: Number, default: 0 }, // 0 = off
+    participantsCanSend: { type: Boolean, default: true }, // false = host/co-hosts only
     storageUsed: { type: Number, default: 0 }, // Total storage used in bytes
+    plan: {
+        type: String,
+        enum: ['free', 'premium', 'pro', 'enterprise'],
+        default: 'free',
+    }, // Controls feature access (video uploads, storage limits, etc.)
 }, { timestamps: true });
 // TTL index for automatic expiration
 RoomSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });

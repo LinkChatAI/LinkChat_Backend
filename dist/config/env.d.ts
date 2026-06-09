@@ -19,6 +19,10 @@ interface EnvConfig {
     GCS_PRIVATE_KEY?: string;
     GOOGLE_API_KEY?: string;
     ADMIN_SECRET?: string;
+    GOOGLE_CLIENT_ID?: string;
+    GOOGLE_CLIENT_SECRET?: string;
+    GOOGLE_OAUTH_REDIRECT_URI?: string;
+    USER_JWT_SECRET?: string;
 }
 export declare const env: EnvConfig;
 export {};

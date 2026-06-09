@@ -14,6 +14,41 @@ import { HandlerContext } from './types.js';
 export const registerModerationHandlers = (ctx: HandlerContext): void => {
   const { io, socket, user, ensureUserInRoom, emitErrorAlert } = ctx;
 
+  socket.on('getOnlineParticipants', async () => {
+    if (!ensureUserInRoom()) {
+      socket.emit('error', { message: 'Not in a room' });
+      return;
+    }
+
+    try {
+      const room = await getRoomByCode(user.roomCode);
+      const sockets = await io.in(user.roomCode).fetchSockets();
+      const seen = new Set<string>();
+      const participants: Array<{
+        userId: string;
+        nickname: string;
+        isOwner: boolean;
+        isCoHost: boolean;
+      }> = [];
+
+      for (const s of sockets) {
+        const su = (s as any).data?.user as SocketUser | undefined;
+        if (!su?.userId || seen.has(su.userId)) continue;
+        seen.add(su.userId);
+        participants.push({
+          userId: su.userId,
+          nickname: su.nickname || 'Anonymous',
+          isOwner: !!(room?.ownerId && room.ownerId === su.userId),
+          isCoHost: !!(room?.coHostIds?.includes(su.userId)),
+        });
+      }
+
+      socket.emit('onlineParticipants', { participants });
+    } catch (error) {
+      emitErrorAlert(error, 'Failed to list online participants');
+    }
+  });
+
   socket.on('getRoomParticipants', async () => {
     if (!ensureUserInRoom()) {
       socket.emit('error', { message: 'Not in a room' });

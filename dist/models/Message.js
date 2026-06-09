@@ -20,6 +20,7 @@ const MessageSchema = new Schema({
     createdAt: { type: Date, default: Date.now, index: true },
     expiresAt: { type: Date, required: false }, // TTL expiration
     deletedByAdmin: { type: Boolean, default: false }, // Flag indicating message was deleted by admin
+    seenBy: { type: [String], default: [] }, // Per-user read receipts
 }, { timestamps: true });
 // TTL index for automatic message expiration (synced with room expiry)
 MessageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
@@ -33,5 +34,7 @@ MessageSchema.index({ roomCode: 1, isPinned: 1 });
 MessageSchema.index({ type: 1, deletedByAdmin: 1, createdAt: -1 });
 // Index for fileMeta.size queries
 MessageSchema.index({ 'fileMeta.size': 1 });
+// Compound index for per-user read receipts
+MessageSchema.index({ id: 1, seenBy: 1 });
 export const MessageModel = mongoose.model('Message', MessageSchema);
 //# sourceMappingURL=Message.js.map

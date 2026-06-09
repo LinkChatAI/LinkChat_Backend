@@ -136,7 +136,11 @@ export const searchMessages = async (roomCode, query, limit = 50) => {
     const searchRegex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     const messages = await MessageModel.find({
         roomCode,
-        content: searchRegex,
+        $or: [
+            { content: searchRegex },
+            { 'fileMeta.name': searchRegex },
+            { nickname: searchRegex },
+        ],
     })
         .sort({ createdAt: -1 })
         .limit(Math.min(limit, 100))

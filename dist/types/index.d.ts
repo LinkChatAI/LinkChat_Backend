@@ -1,10 +1,14 @@
+export type RoomPlan = 'free' | 'premium' | 'pro' | 'enterprise';
+export type UserPlan = RoomPlan;
 export interface Room {
     code: string;
     token: string;
     ownerId?: string;
+    ownerUserId?: string;
     name?: string;
     slug?: string;
     isPublic?: boolean;
+    plan?: RoomPlan;
     createdAt: Date;
     expiresAt: Date;
     participants: string[];
@@ -15,6 +19,7 @@ export interface Room {
     lockedAt?: Date;
     coHostIds?: string[];
     slowModeMessagesPerMinute?: number;
+    participantsCanSend?: boolean;
     storageUsed?: number;
 }
 export interface Message {
@@ -40,6 +45,7 @@ export interface Message {
     createdAt: Date;
     expiresAt?: Date;
     deletedByAdmin?: boolean;
+    seenBy?: string[];
     tempId?: string;
 }
 export interface CreateRoomRequest {
@@ -47,6 +53,8 @@ export interface CreateRoomRequest {
     name?: string;
     isPublic?: boolean;
     userId?: string;
+    ownerUserId?: string;
+    plan?: RoomPlan;
 }
 export interface JoinRoomRequest {
     nickname?: string;

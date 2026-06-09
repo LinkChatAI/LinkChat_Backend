@@ -1,10 +1,11 @@
 import { Router } from 'express';
-import { createRoomHandler, getRoomHandler, generateUploadUrlHandler, generateUploadUrlPublicHandler, generatePairingCodeHandler, validatePairingCodeHandler, endRoomHandler, leaveRoomHandler, deleteRoomHandler, } from '../controllers/roomController.js';
+import { createRoomHandler, getRoomHandler, generateUploadUrlHandler, generateUploadUrlPublicHandler, generatePairingCodeHandler, validatePairingCodeHandler, endRoomHandler, leaveRoomHandler, deleteRoomHandler, getMessagesHandler, } from '../controllers/roomController.js';
 import { getShareMetaHandler } from '../controllers/seoController.js';
 import { authenticateRoom } from '../middleware/auth.js';
+import { optionalAuthenticateUser } from '../middleware/userAuth.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
 const router = Router();
-router.post('/', rateLimiter('createRoom'), createRoomHandler);
+router.post('/', rateLimiter('createRoom'), optionalAuthenticateUser, createRoomHandler);
 router.get('/:slugOrCode', rateLimiter('getRoom'), getRoomHandler);
 router.get('/:slugOrCode/sharemeta', rateLimiter('getRoom'), getShareMetaHandler);
 router.post('/:code/upload-url', rateLimiter('uploadUrl'), authenticateRoom, generateUploadUrlHandler);
@@ -14,5 +15,6 @@ router.post('/pairing/validate', rateLimiter('default'), validatePairingCodeHand
 router.post('/:code/end', rateLimiter('default'), authenticateRoom, endRoomHandler);
 router.post('/:code/leave', rateLimiter('default'), leaveRoomHandler);
 router.delete('/:code', rateLimiter('default'), deleteRoomHandler);
+router.get('/:code/messages', rateLimiter('getRoom'), getMessagesHandler);
 export default router;
 //# sourceMappingURL=roomRoutes.js.map

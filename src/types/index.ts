@@ -45,6 +45,7 @@ export interface Message {
   createdAt: Date;
   expiresAt?: Date; // TTL for auto-deletion (synced with room expiry)
   deletedByAdmin?: boolean; // Flag indicating message was deleted by admin
+  seenBy?: string[]; // Per-user read receipts — array of userIds who have seen this message
   // Client-side ID for message reconciliation (echoed back from client)
   tempId?: string; // Temporary ID sent from client, echoed back by server
 }

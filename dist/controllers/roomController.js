@@ -1,6 +1,7 @@
 import { createRoom, getRoomByCode, getRoomBySlugOrCode, endRoom, removeParticipant } from '../services/roomService.js';
 import { generateUploadUrl, deleteRoomFiles } from '../services/gcsService.js';
 import { isFileUploadAvailable } from '../config/gcs.js';
+import { isPremiumPlan } from '../utils/planUtils.js';
 import { z } from 'zod';
 import { logger } from '../utils/logger.js';
 import { validateFileUpload } from '../utils/validation.js';
@@ -11,11 +12,13 @@ import { getIoInstance } from '../socket/ioInstance.js';
 import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
 import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
-import { ROOM_STORAGE_LIMIT_BYTES } from '../constants/roomStorage.js';
+import { getStorageLimitForPlan } from '../constants/roomStorage.js';
+const VALID_PLANS = ['free', 'premium', 'pro', 'enterprise'];
 const createRoomSchema = z.object({
     name: z.string().max(100).optional(),
     isPublic: z.boolean().optional(),
     userId: z.string().uuid().optional(), // UUID of the room creator
+    plan: z.enum(VALID_PLANS).optional(), // Subscription plan for the room
 });
 const uploadUrlSchema = z.object({
     fileName: z.string().min(1),
@@ -25,10 +28,29 @@ const uploadUrlSchema = z.object({
 export const createRoomHandler = async (req, res) => {
     try {
         const body = createRoomSchema.parse(req.body);
+        const requestedPlan = body.plan || 'free';
+        if (requestedPlan !== 'free') {
+            if (!req.user) {
+                res.status(401).json({
+                    error: 'Sign in required for Premium/Pro rooms',
+                    code: 'AUTH_REQUIRED',
+                });
+                return;
+            }
+            if (!isPremiumPlan(req.user.plan)) {
+                res.status(403).json({
+                    error: 'Premium or Pro subscription required',
+                    code: 'PREMIUM_REQUIRED',
+                });
+                return;
+            }
+        }
         const data = {
             name: body.name ? sanitizeName(body.name) : undefined,
             isPublic: body.isPublic || false,
-            userId: body.userId, // Pass userId to service
+            userId: body.userId,
+            plan: requestedPlan,
+            ownerUserId: req.user?.userId,
         };
         const room = await createRoom(data);
         logger.info('Room created', { code: room.code, slug: room.slug, ownerId: room.ownerId });
@@ -44,8 +66,9 @@ export const createRoomHandler = async (req, res) => {
             token: room.token,
             slug: room.slug,
             name: room.name,
+            plan: room.plan || 'free',
             expiresAt: room.expiresAt,
-            ownerId: room.ownerId, // Return ownerId to frontend
+            ownerId: room.ownerId,
         });
     }
     catch (error) {
@@ -116,7 +139,8 @@ export const getRoomHandler = async (req, res) => {
             code: room.code,
             slug: room.slug,
             name: room.name,
-            ownerId: room.ownerId, // Include ownerId for RBAC
+            ownerId: room.ownerId,
+            plan: room.plan || 'free',
             createdAt: room.createdAt,
             expiresAt: room.expiresAt,
             participantCount: room.participants.length,
@@ -124,9 +148,10 @@ export const getRoomHandler = async (req, res) => {
             isLocked: room.isLocked || false,
             lockedAt: room.lockedAt ? room.lockedAt.toISOString() : undefined,
             storageUsed: room.storageUsed || 0,
-            storageLimitBytes: ROOM_STORAGE_LIMIT_BYTES,
+            storageLimitBytes: getStorageLimitForPlan(room.plan),
             coHostIds: room.coHostIds || [],
             slowModeMessagesPerMinute: room.slowModeMessagesPerMinute ?? 0,
+            participantsCanSend: room.participantsCanSend !== false,
         });
     }
     catch (error) {
@@ -466,6 +491,55 @@ export const deleteRoomHandler = async (req, res) => {
             error: error instanceof Error ? error.message : 'Failed to delete room',
             code: 'DELETE_ROOM_ERROR'
         });
+    }
+};
+export const getMessagesHandler = async (req, res) => {
+    try {
+        const { code } = req.params;
+        const limitParam = parseInt(typeof req.query.limit === 'string' ? req.query.limit : '50', 10);
+        const limit = isNaN(limitParam) || limitParam < 1 ? 50 : Math.min(limitParam, 100);
+        const beforeId = typeof req.query.before === 'string' ? req.query.before.trim() : '';
+        // Validate room exists
+        const room = await getRoomByCode(code);
+        if (!room) {
+            logger.warn('getMessages: Room not found', { code });
+            res.status(404).json({ error: 'Room not found' });
+            return;
+        }
+        const query = {
+            roomCode: code,
+            deletedByAdmin: { $ne: true },
+        };
+        if (beforeId) {
+            // Find the anchor message's createdAt for range query
+            const anchorMessage = await MessageModel.findOne({ id: beforeId, roomCode: code }).lean().exec();
+            if (!anchorMessage) {
+                logger.warn('getMessages: Anchor message not found', { code, beforeId });
+                res.status(404).json({ error: 'Anchor message not found' });
+                return;
+            }
+            query.createdAt = { $lt: anchorMessage.createdAt };
+        }
+        // Fetch one extra record to determine whether there are more pages
+        const rawMessages = await MessageModel
+            .find(query)
+            .sort({ createdAt: -1 })
+            .limit(limit + 1)
+            .lean()
+            .exec();
+        const hasMore = rawMessages.length > limit;
+        const pageMessages = rawMessages.slice(0, limit);
+        // Return in ascending chronological order (oldest first)
+        pageMessages.reverse();
+        logger.debug('getMessages: returning messages', { code, count: pageMessages.length, hasMore, beforeId });
+        res.json({ messages: pageMessages, hasMore });
+    }
+    catch (error) {
+        logger.error('Error fetching room messages', {
+            error: error instanceof Error ? error.message : String(error),
+            code: req.params.code,
+        });
+        res.status(500).json({ error: 'Failed to fetch messages' });
     }
 };
 //# sourceMappingURL=roomController.js.map

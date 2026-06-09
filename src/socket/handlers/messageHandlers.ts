@@ -19,7 +19,7 @@ import { logger } from '../../utils/logger.js';
 import { socketRateLimiter } from '../../middleware/rateLimiter.js';
 import { MessageModel } from '../../models/Message.js';
 import { emitAdminInsightUpdate } from '../adminHandlers.js';
-import { HandlerContext, normalizeMessageType, normalizeMessages } from './types.js';
+import { HandlerContext, normalizeMessageType, normalizeMessages, stripHeavyContentForJoin } from './types.js';
 import { isUserMuted } from '../../services/roomModerationService.js';
 import { canModerateRoom } from '../../services/roomPermissionService.js';
 import { checkSlowMode } from '../../services/slowModeService.js';
@@ -47,7 +47,7 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
       }
 
       const messages = await getMessagesAfterId(user.roomCode, data?.lastMessageId);
-      const normalizedMessages = normalizeMessages(messages);
+      const normalizedMessages = stripHeavyContentForJoin(messages);
       socket.emit('messages_synced', { messages: normalizedMessages });
 
       if (ack) ack({ success: true, messages: normalizedMessages });
@@ -634,5 +634,44 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
       typingUsers.delete(key);
     }
     socket.to(user.roomCode).emit('userStoppedTyping', { userId: user.userId });
+  });
+
+  socket.on('markMessageSeen', async (data: { messageId: string }) => {
+    try {
+      if (!user.roomCode) {
+        logger.debug('markMessageSeen: user not in a room', { socketId: socket.id });
+        return;
+      }
+
+      if (!data || typeof data.messageId !== 'string' || !data.messageId.trim()) {
+        logger.debug('markMessageSeen: invalid messageId', { socketId: socket.id });
+        return;
+      }
+
+      const messageId = data.messageId.trim();
+      const userId = socket.handshake.auth?.userId || user.userId;
+
+      // Atomically add the userId to seenBy (no-op if already present)
+      const result = await MessageModel.updateOne(
+        { id: messageId, roomCode: user.roomCode },
+        { $addToSet: { seenBy: userId } }
+      );
+
+      if (result.matchedCount === 0) {
+        logger.debug('markMessageSeen: message not found', { messageId, roomCode: user.roomCode });
+        return;
+      }
+
+      // Broadcast to everyone in the room (including sender) so UIs can update
+      io.to(user.roomCode).emit('messageSeen', { messageId, userId });
+
+      logger.debug('markMessageSeen: marked', { messageId, userId, roomCode: user.roomCode });
+    } catch (error: any) {
+      // Intentionally non-throwing — read receipts must never crash the message pipeline
+      logger.error('markMessageSeen: error', {
+        error: error instanceof Error ? error.message : String(error),
+        socketId: socket.id,
+      });
+    }
   });
 };

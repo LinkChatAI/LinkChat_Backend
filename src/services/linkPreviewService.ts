@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger.js';
+import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 
 export interface LinkPreviewData {
   url: string;
@@ -13,6 +14,7 @@ interface CacheEntry {
 }
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const REDIS_CACHE_TTL_S = 60 * 60; // 1 hour in seconds (for Redis EX)
 const MAX_CACHE_SIZE = 500;
 const previewCache = new Map<string, CacheEntry>();
 
@@ -33,7 +35,19 @@ function checkRateLimit(clientKey: string): boolean {
   return true;
 }
 
-function getCached(url: string): LinkPreviewData | null | undefined {
+async function getCached(url: string): Promise<LinkPreviewData | null | undefined> {
+  const redis = getRedisClient();
+  if (redis && isRedisAvailable()) {
+    try {
+      const raw = await redis.get(`link_preview:${url}`);
+      if (raw === null) return undefined; // Not in Redis cache
+      if (raw === '') return null;         // Negative cache hit
+      return JSON.parse(raw) as LinkPreviewData;
+    } catch {
+      // Fall through to in-memory cache on Redis error
+    }
+  }
+  // In-memory fallback
   const entry = previewCache.get(url);
   if (!entry) return undefined;
   if (Date.now() > entry.expiresAt) {
@@ -43,7 +57,18 @@ function getCached(url: string): LinkPreviewData | null | undefined {
   return entry.data;
 }
 
-function setCache(url: string, data: LinkPreviewData | null): void {
+async function setCache(url: string, data: LinkPreviewData | null): Promise<void> {
+  const redis = getRedisClient();
+  if (redis && isRedisAvailable()) {
+    try {
+      // Store empty string as a sentinel for negative cache (null preview)
+      const value = data === null ? '' : JSON.stringify(data);
+      await redis.set(`link_preview:${url}`, value, 'EX', REDIS_CACHE_TTL_S);
+    } catch {
+      // Non-fatal: fall through to in-memory cache
+    }
+  }
+  // Always also update in-memory cache as a fast local layer
   if (previewCache.size >= MAX_CACHE_SIZE) {
     const firstKey = previewCache.keys().next().value;
     if (firstKey) previewCache.delete(firstKey);
@@ -76,7 +101,7 @@ function resolveUrl(base: string, relative: string): string {
 function isValidPreviewUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    if (parsed.protocol !== 'https:') return false;
     const host = parsed.hostname.toLowerCase();
     if (host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.') || host.startsWith('10.')) {
       return false;
@@ -87,40 +112,55 @@ function isValidPreviewUrl(url: string): boolean {
   }
 }
 
-export async function fetchLinkPreview(url: string, clientKey: string): Promise<LinkPreviewData | null> {
-  if (!isValidPreviewUrl(url)) {
-    return null;
-  }
-
-  if (!checkRateLimit(clientKey)) {
-    throw new Error('Link preview rate limit exceeded. Please try again later.');
-  }
-
-  const cached = getCached(url);
-  if (cached !== undefined) return cached;
-
+async function fetchWithRedirects(url: string, maxRedirects = 2): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
     const response = await fetch(url, {
       signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; LinkChatBot/1.0; +https://linkchat.app)',
         Accept: 'text/html,application/xhtml+xml',
       },
-      redirect: 'follow',
+      redirect: 'manual',
     });
+
+    if ([301, 302, 303, 307, 308].includes(response.status) && maxRedirects > 0) {
+      const location = response.headers.get('location');
+      if (location) {
+        const nextUrl = resolveUrl(url, location);
+        if (isValidPreviewUrl(nextUrl)) {
+          return fetchWithRedirects(nextUrl, maxRedirects - 1);
+        }
+      }
+    }
+    return response;
+  } finally {
     clearTimeout(timeout);
+  }
+}
+
+export async function fetchLinkPreview(url: string, clientKey: string): Promise<LinkPreviewData | null> {
+  if (!isValidPreviewUrl(url)) return null;
+  if (!checkRateLimit(clientKey)) {
+    throw new Error('Link preview rate limit exceeded. Please try again later.');
+  }
+
+  const cached = await getCached(url);
+  if (cached !== undefined) return cached;
+
+  try {
+    const response = await fetchWithRedirects(url);
 
     if (!response.ok) {
-      setCache(url, null);
+      await setCache(url, null);
       return null;
     }
 
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
-      setCache(url, null);
+      await setCache(url, null);
       return null;
     }
 
@@ -141,9 +181,7 @@ export async function fetchLinkPreview(url: string, clientKey: string): Promise<
       extractMeta(limitedHtml, 'og:image') ||
       extractMeta(limitedHtml, 'twitter:image');
 
-    if (image) {
-      image = resolveUrl(url, image);
-    }
+    if (image) image = resolveUrl(url, image);
 
     const preview: LinkPreviewData = {
       url,
@@ -152,14 +190,14 @@ export async function fetchLinkPreview(url: string, clientKey: string): Promise<
       image,
     };
 
-    setCache(url, preview);
+    await setCache(url, preview);
     return preview;
   } catch (error) {
     logger.debug('Link preview fetch failed', {
       url,
       error: error instanceof Error ? error.message : String(error),
     });
-    setCache(url, null);
+    await setCache(url, null);
     return null;
   }
 }

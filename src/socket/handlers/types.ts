@@ -25,3 +25,20 @@ export const normalizeMessageType = (message: Message): Message => {
 export const normalizeMessages = (messages: Message[]): Message[] => {
   return messages.map(normalizeMessageType);
 };
+
+/** Shrink join/sync payloads so large base64 file bodies do not exceed Socket.IO limits. */
+export const stripHeavyContentForJoin = (messages: Message[]): Message[] => {
+  return normalizeMessages(messages).map((message) => {
+    const content = message.content || '';
+    const hasEmbeddedDataUrl =
+      content.startsWith('data:') || content.includes('](data:');
+    if (!hasEmbeddedDataUrl || content.length <= 2048) {
+      return message;
+    }
+
+    const placeholder =
+      message.fileMeta?.url ||
+      (message.fileMeta?.name ? `[File: ${message.fileMeta.name}]` : '[File]');
+    return { ...message, content: placeholder };
+  });
+};

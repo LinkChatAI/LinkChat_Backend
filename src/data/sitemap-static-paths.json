@@ -1,0 +1,344 @@
+[
+  {
+    "path": "/",
+    "changefreq": "daily",
+    "priority": "1.0",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/create",
+    "changefreq": "daily",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/join",
+    "changefreq": "daily",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-create-room",
+    "changefreq": "daily",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-join-room",
+    "changefreq": "daily",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-about",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-how-it-works",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-pricing",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-contact",
+    "changefreq": "yearly",
+    "priority": "0.4",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-careers",
+    "changefreq": "monthly",
+    "priority": "0.5",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/blog",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/tools",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/tools/chat-link-generator",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/tools/website-engagement-tester",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/tools/support-response-time-calculator",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-jp",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-iran-war",
+    "changefreq": "daily",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-rivian-r2",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-usa",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-gta-6",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-usa-whatsapp-alternative",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-usa-business-chat",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-usa-study-groups",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-usa-remote-team",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/linkchat-gemini-chat",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  },
+  {
+    "path": "/blog/chatgpt-alternative-for-group-chat",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-05-20"
+  },
+  {
+    "path": "/blog/create-free-temporary-chat-room",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-05-10"
+  },
+  {
+    "path": "/blog/secure-private-chat-without-signup",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-04-28"
+  },
+  {
+    "path": "/blog/chat-rooms-for-teams-and-events",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-04-15"
+  },
+  {
+    "path": "/blog/qr-code-chat-rooms-explained",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-03-30"
+  },
+  {
+    "path": "/blog/why-ephemeral-chat-is-better",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-03-10"
+  },
+  {
+    "path": "/blog/free-instant-file-sharing-without-account",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-02-20"
+  },
+  {
+    "path": "/blog/best-chat-apps-no-phone-number-2026",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-02-05"
+  },
+  {
+    "path": "/blog/linkchat-vs-whatsapp-telegram-discord-slack",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-03"
+  },
+  {
+    "path": "/blog/add-chat-widget-to-shopify-5-minutes",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-01"
+  },
+  {
+    "path": "/blog/lightweight-chat-for-nextjs",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-01"
+  },
+  {
+    "path": "/blog/securing-client-communications-freelancers",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-01"
+  },
+  {
+    "path": "/blog/whatsapp-link-generator-shopify-ecommerce",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-02"
+  },
+  {
+    "path": "/blog/whatsapp-link-generator-prefilled-message",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-02"
+  },
+  {
+    "path": "/blog/click-to-chat-link-business-card",
+    "changefreq": "monthly",
+    "priority": "0.7",
+    "lastmod": "2026-06-02"
+  },
+  {
+    "path": "/blog/temporary-chat-room-no-signup",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-02"
+  },
+  {
+    "path": "/blog/secure-anonymous-chat-link-generator",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-02"
+  },
+  {
+    "path": "/blog/add-live-chat-react-app",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-02"
+  },
+  {
+    "path": "/blog/free-live-chat-wordpress",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-02"
+  },
+  {
+    "path": "/blog/line-chat-link-generator-japan",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-03"
+  },
+  {
+    "path": "/blog/ichiji-chat-room-musen-toroku",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-03"
+  },
+  {
+    "path": "/blog/google-gemni-gemini-ai-chat-free-alternative",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-04"
+  },
+  {
+    "path": "/blog/rivian-r2-2026-price-specs-release",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-04"
+  },
+  {
+    "path": "/blog/gta-6-release-date-map-lucia-price-delay",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-04"
+  },
+  {
+    "path": "/blog/2024-nissan-gtr-mclaren-senna-gtr-supercars",
+    "changefreq": "weekly",
+    "priority": "0.6",
+    "lastmod": "2026-06-04"
+  },
+  {
+    "path": "/blog/us-iran-war-news-live-discussion-chat",
+    "changefreq": "daily",
+    "priority": "0.7",
+    "lastmod": "2026-06-05"
+  },
+  {
+    "path": "/blog/seo-services-free-tools-agency-chat",
+    "changefreq": "monthly",
+    "priority": "0.6",
+    "lastmod": "2026-06-05"
+  },
+  {
+    "path": "/blog/whatsapp-alternative-usa-no-phone-number-2026",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-05"
+  },
+  {
+    "path": "/blog/free-live-chat-small-business-america",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-05"
+  },
+  {
+    "path": "/blog/college-study-group-chat-usa-no-signup",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-04"
+  },
+  {
+    "path": "/blog/remote-team-chat-usa-freelancers-startups",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-04"
+  },
+  {
+    "path": "/blog/gta-6-us-community-chat-rooms-guide",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-06"
+  }
+]

@@ -9,6 +9,7 @@ import {
   endRoomHandler,
   leaveRoomHandler,
   deleteRoomHandler,
+  getMessagesHandler,
 } from '../controllers/roomController.js';
 import { getShareMetaHandler } from '../controllers/seoController.js';
 import { authenticateRoom } from '../middleware/auth.js';
@@ -27,6 +28,7 @@ router.post('/pairing/validate', rateLimiter('default'), validatePairingCodeHand
 router.post('/:code/end', rateLimiter('default'), authenticateRoom, endRoomHandler);
 router.post('/:code/leave', rateLimiter('default'), leaveRoomHandler);
 router.delete('/:code', rateLimiter('default'), deleteRoomHandler);
+router.get('/:code/messages', rateLimiter('getRoom'), getMessagesHandler);
 
 export default router;
 

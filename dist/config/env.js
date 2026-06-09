@@ -66,7 +66,12 @@ const validateEnv = () => {
         GCS_PROJECT_ID: process.env.GCS_PROJECT_ID,
         GCS_CLIENT_EMAIL: process.env.GCS_CLIENT_EMAIL,
         GCS_PRIVATE_KEY: process.env.GCS_PRIVATE_KEY,
+        GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
         ADMIN_SECRET: process.env.ADMIN_SECRET,
+        GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+        GOOGLE_OAUTH_REDIRECT_URI: process.env.GOOGLE_OAUTH_REDIRECT_URI,
+        USER_JWT_SECRET: process.env.USER_JWT_SECRET || process.env.JWT_SECRET,
     };
 };
 export const env = validateEnv();

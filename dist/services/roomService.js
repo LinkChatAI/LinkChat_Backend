@@ -62,9 +62,11 @@ export const createRoom = async (data) => {
             name: data?.name,
             slug,
             isPublic: data?.isPublic || false,
+            plan: data?.plan || 'free',
             expiresAt,
             participants: [],
-            ownerId: data?.userId, // Save userId as ownerId for RBAC
+            ownerId: data?.userId,
+            ownerUserId: data?.ownerUserId,
         });
         await room.save();
         logger.debug('Room created', { code, slug, expiresAt: expiresAt.toISOString() });
@@ -319,6 +321,16 @@ export const setRoomSlowMode = async (code, messagesPerMinute) => {
     }
     const limit = Math.max(0, Math.min(60, Math.floor(messagesPerMinute)));
     const room = await RoomModel.findOneAndUpdate({ code }, { slowModeMessagesPerMinute: limit }, { new: true });
+    if (!room) {
+        throw new Error('Room not found');
+    }
+    return room.toObject();
+};
+export const setParticipantsCanSend = async (code, canSend) => {
+    if (mongoose.connection.readyState !== 1) {
+        throw new Error('Database connection not available');
+    }
+    const room = await RoomModel.findOneAndUpdate({ code }, { participantsCanSend: canSend }, { new: true });
     if (!room) {
         throw new Error('Room not found');
     }

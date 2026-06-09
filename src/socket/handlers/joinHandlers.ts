@@ -7,7 +7,7 @@ import { SocketUser } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
 import { sanitizeName } from '../../utils/sanitize.js';
 import { emitAdminInsightUpdate } from '../adminHandlers.js';
-import { HandlerContext, normalizeMessages } from './types.js';
+import { HandlerContext, stripHeavyContentForJoin } from './types.js';
 import { clearPendingDeletionTimer, hasPendingDeletion } from './roomLifecycleHandlers.js';
 import { getScreenSharePublicState } from '../screenShareState.js';
 import { recordFailedJoin } from '../../services/platformMetricsService.js';
@@ -15,6 +15,34 @@ import { isUserKicked } from '../../services/roomModerationService.js';
 import { getStorageLimitForPlan } from '../../constants/roomStorage.js';
 
 const getRedis = () => getRedisClient();
+
+const getOnlineParticipantSnapshots = async (
+  io: Server,
+  roomCode: string,
+): Promise<Array<{ userId: string; nickname: string }>> => {
+  const participants: Array<{ userId: string; nickname: string }> = [];
+  const seen = new Set<string>();
+
+  try {
+    const sockets = await io.in(roomCode).fetchSockets();
+    for (const s of sockets) {
+      const su = (s as { data?: { user?: SocketUser } }).data?.user;
+      if (!su?.userId || seen.has(su.userId)) continue;
+      seen.add(su.userId);
+      participants.push({
+        userId: su.userId,
+        nickname: su.nickname || 'Anonymous',
+      });
+    }
+  } catch (error: unknown) {
+    logger.warn('Failed to list online participants on join', {
+      error: error instanceof Error ? error.message : String(error),
+      roomCode,
+    });
+  }
+
+  return participants;
+};
 
 const waitForDatabase = async (maxRetries = 10, delayMs = 1000): Promise<boolean> => {
   for (let i = 0; i < maxRetries; i++) {
@@ -245,7 +273,8 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       }
 
       const messages = await getRoomMessages(code);
-      const normalizedMessages = normalizeMessages(messages);
+      const normalizedMessages = stripHeavyContentForJoin(messages);
+      const participants = await getOnlineParticipantSnapshots(io, code);
       socket.emit('roomJoined', {
         messages: normalizedMessages,
         userId: user.userId,
@@ -259,6 +288,7 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         screenShare: getScreenSharePublicState(code),
         storageUsed: activeRoom.storageUsed || 0,
         storageLimitBytes: getStorageLimitForPlan(activeRoom.plan as string | undefined),
+        participants,
       });
       socket.to(code).emit('userJoined', { userId: user.userId, nickname: user.nickname });
 

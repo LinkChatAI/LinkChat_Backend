@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -16,6 +17,8 @@ import adminRoutes from './routes/adminRoutes.js';
 import contactRoutes from './routes/contactRoutes.js';
 import fileRoutes from './routes/fileRoutes.js';
 import linkPreviewRoutes from './routes/linkPreviewRoutes.js';
+import authRoutes from './routes/authRoutes.js';
+import userRoutes from './routes/userRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startCleanupJob } from './services/cleanupService.js';
 import { logger } from './utils/logger.js';
@@ -100,6 +103,7 @@ app.post('/api/rooms', roomCreationLimiter);
 // File upload URL generation
 app.use('/api/files/get-upload-url', uploadLimiter);
 // Body parser with size limits
+app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Handle local file uploads (PUT requests to /api/uploads/*) - must be before static file serving
@@ -219,6 +223,8 @@ app.post('/api/admin/reconnect-db', async (req, res) => {
 // SEO routes
 app.use('/', seoRoutes);
 // API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/user', userRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/nickname', nicknameRoutes);
 app.use('/api/contact', contactRoutes);

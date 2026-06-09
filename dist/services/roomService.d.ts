@@ -12,5 +12,6 @@ export declare const transferRoomOwnership: (code: string, newOwnerId: string) =
 export declare const addRoomCoHost: (code: string, userId: string) => Promise<Room>;
 export declare const removeRoomCoHost: (code: string, userId: string) => Promise<Room>;
 export declare const setRoomSlowMode: (code: string, messagesPerMinute: number) => Promise<Room>;
+export declare const setParticipantsCanSend: (code: string, canSend: boolean) => Promise<Room>;
 export declare const lockRoom: (code: string) => Promise<Room>;
 //# sourceMappingURL=roomService.d.ts.map

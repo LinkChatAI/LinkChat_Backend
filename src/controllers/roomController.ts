@@ -566,3 +566,60 @@ export const deleteRoomHandler = async (req: Request, res: Response): Promise<vo
   }
 };
 
+export const getMessagesHandler = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { code } = req.params;
+    const limitParam = parseInt(typeof req.query.limit === 'string' ? req.query.limit : '50', 10);
+    const limit = isNaN(limitParam) || limitParam < 1 ? 50 : Math.min(limitParam, 100);
+    const beforeId = typeof req.query.before === 'string' ? req.query.before.trim() : '';
+
+    // Validate room exists
+    const room = await getRoomByCode(code);
+    if (!room) {
+      logger.warn('getMessages: Room not found', { code });
+      res.status(404).json({ error: 'Room not found' });
+      return;
+    }
+
+    const query: Record<string, any> = {
+      roomCode: code,
+      deletedByAdmin: { $ne: true },
+    };
+
+    if (beforeId) {
+      // Find the anchor message's createdAt for range query
+      const anchorMessage = await MessageModel.findOne({ id: beforeId, roomCode: code }).lean().exec();
+      if (!anchorMessage) {
+        logger.warn('getMessages: Anchor message not found', { code, beforeId });
+        res.status(404).json({ error: 'Anchor message not found' });
+        return;
+      }
+      query.createdAt = { $lt: anchorMessage.createdAt };
+    }
+
+    // Fetch one extra record to determine whether there are more pages
+    const rawMessages = await MessageModel
+      .find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit + 1)
+      .lean()
+      .exec();
+
+    const hasMore = rawMessages.length > limit;
+    const pageMessages = rawMessages.slice(0, limit);
+
+    // Return in ascending chronological order (oldest first)
+    pageMessages.reverse();
+
+    logger.debug('getMessages: returning messages', { code, count: pageMessages.length, hasMore, beforeId });
+    res.json({ messages: pageMessages, hasMore });
+  } catch (error: any) {
+    logger.error('Error fetching room messages', {
+      error: error instanceof Error ? error.message : String(error),
+      code: req.params.code,
+    });
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+};
+
+
