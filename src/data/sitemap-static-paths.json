@@ -69,7 +69,13 @@
     "path": "/tools",
     "changefreq": "weekly",
     "priority": "0.8",
-    "lastmod": "2026-06-06"
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/free-tools-hub",
+    "changefreq": "weekly",
+    "priority": "0.9",
+    "lastmod": "2026-06-14"
   },
   {
     "path": "/tools/chat-link-generator",
@@ -87,7 +93,97 @@
     "path": "/tools/support-response-time-calculator",
     "changefreq": "weekly",
     "priority": "0.7",
-    "lastmod": "2026-06-06"
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/qr-code-generator",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/utm-link-builder",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/bio-link-generator",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/message-character-counter",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/timezone-meeting-planner",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/ai-chat-room-name-generator",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/floating-chat-button-generator",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/room-code-generator",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/email-signature-chat-link",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/chat-widget-cost-calculator",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/invite-message-generator",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/phone-number-validator",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/password-breach-checker",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/email-breach-checker",
+    "changefreq": "weekly",
+    "priority": "0.8",
+    "lastmod": "2026-06-14"
+  },
+  {
+    "path": "/tools/disposable-email-checker",
+    "changefreq": "weekly",
+    "priority": "0.7",
+    "lastmod": "2026-06-14"
   },
   {
     "path": "/linkchat-jp",

@@ -117,18 +117,45 @@ const ensureNicknameUniqueInRoom = async (
   }
 
   const baseLower = baseNickname.toLowerCase();
-  if (!existingNicknames.has(baseLower)) return baseNickname;
+
+  const tryReserve = async (candidate: string): Promise<string | null> => {
+    // Atomic Redis reservation — prevents concurrent-join race where two users
+    // both read the same nickname set before either has written their choice.
+    const redis = getRedis();
+    if (redis && isRedisAvailable()) {
+      try {
+        const added = await redis.sadd(`room:${roomCode}:nicknames`, candidate.toLowerCase());
+        if (added === 1) {
+          // Successfully reserved — set TTL to 6 hours
+          redis.expire(`room:${roomCode}:nicknames`, 21600).catch(() => {});
+          return candidate;
+        }
+        return null; // Someone else took it concurrently
+      } catch {
+        // Redis unavailable — fall back to in-memory check only
+      }
+    }
+    return existingNicknames.has(candidate.toLowerCase()) ? null : candidate;
+  };
+
+  if (!existingNicknames.has(baseLower)) {
+    const reserved = await tryReserve(baseNickname);
+    if (reserved) return reserved;
+  }
 
   let attempts = 0;
   const maxAttempts = 20;
   while (attempts < maxAttempts) {
     const suffix = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-    const uniqueNickname = `${baseNickname}#${suffix}`;
-    if (!existingNicknames.has(uniqueNickname.toLowerCase())) {
-      logger.debug('Nickname conflict resolved with suffix', {
-        original: baseNickname, unique: uniqueNickname, roomCode, excludeUserId,
-      });
-      return uniqueNickname;
+    const candidate = `${baseNickname}#${suffix}`;
+    if (!existingNicknames.has(candidate.toLowerCase())) {
+      const reserved = await tryReserve(candidate);
+      if (reserved) {
+        logger.debug('Nickname conflict resolved with suffix', {
+          original: baseNickname, unique: reserved, roomCode, excludeUserId,
+        });
+        return reserved;
+      }
     }
     attempts++;
   }
@@ -201,6 +228,35 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         return;
       }
 
+      // Join lock: block genuinely new participants when host has locked the room to new joiners.
+      // Existing participants (who were already in this room's Redis member set) are allowed through.
+      const authUserId = socket.handshake.auth?.userId || joinUserId;
+      const isOwnerJoining = room.ownerId && room.ownerId === authUserId;
+      if (room.joinLocked && !isOwnerJoining) {
+        // Check if this user has previously been in the room (Redis set)
+        let isReturningParticipant = false;
+        const redis = getRedis();
+        if (redis && isRedisAvailable()) {
+          try {
+            isReturningParticipant = !!(await redis.sismember(`room:${code}:users`, joinUserId));
+          } catch {
+            // Redis unavailable — fall back to socket check
+            const sockets = await io.in(code).fetchSockets();
+            isReturningParticipant = sockets.some((s: any) => s.data?.user?.userId === joinUserId);
+          }
+        } else {
+          // No Redis — check current sockets
+          const sockets = await io.in(code).fetchSockets();
+          isReturningParticipant = sockets.some((s: any) => s.data?.user?.userId === joinUserId);
+        }
+
+        if (!isReturningParticipant) {
+          recordFailedJoin(true);
+          socket.emit('error', { message: 'This room is currently closed to new participants.' });
+          return;
+        }
+      }
+
       let nickname: string;
       if (data.nickname && typeof data.nickname === 'string' && data.nickname.trim()) {
         const providedNickname = sanitizeName(data.nickname.trim());
@@ -239,17 +295,16 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       const redis = getRedis();
       if (redis && isRedisAvailable()) {
         try {
-          await redis.sadd(`room:${data.code}:users`, user.userId);
+          await redis.sadd(`room:${code}:users`, user.userId);
           await redis.hset(`user:${user.userId}`, {
             nickname: user.nickname,
-            roomCode: data.code,
+            roomCode: code,
           });
         } catch (error: any) {
           // Ignore Redis errors
         }
       }
 
-      const authUserId = socket.handshake.auth?.userId || user.userId;
       const isOwner = room.ownerId && room.ownerId === authUserId;
 
       if (isOwner && hasPendingDeletion(code)) {
@@ -285,6 +340,7 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         coHostIds: activeRoom.coHostIds || [],
         slowModeMessagesPerMinute: activeRoom.slowModeMessagesPerMinute ?? 0,
         participantsCanSend: activeRoom.participantsCanSend !== false,
+        joinLocked: activeRoom.joinLocked === true,
         screenShare: getScreenSharePublicState(code),
         storageUsed: activeRoom.storageUsed || 0,
         storageLimitBytes: getStorageLimitForPlan(activeRoom.plan as string | undefined),

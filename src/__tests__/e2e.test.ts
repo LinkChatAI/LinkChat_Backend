@@ -306,23 +306,26 @@ describe('E2E Tests', () => {
       expect(res.body.error).toContain('exceeds maximum');
     });
 
-    it('should reject invalid MIME types', async () => {
+    it('should accept APK, XML, and Excel MIME types', async () => {
       const createRes = await request(app)
         .post('/api/rooms')
         .send({ name: 'MIME Test' });
-      
+
       const { code, token } = createRes.body;
-      const res = await request(app)
-        .post(`/api/rooms/${code}/upload-url`)
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          fileName: 'script.exe',
-          mimeType: 'application/x-msdownload',
-          fileSize: 1024,
-        });
-      
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain('not allowed');
+
+      for (const payload of [
+        { fileName: 'app.apk', mimeType: 'application/vnd.android.package-archive', fileSize: 1024 },
+        { fileName: 'data.xml', mimeType: 'application/xml', fileSize: 1024 },
+        { fileName: 'sheet.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileSize: 2048 },
+      ]) {
+        const res = await request(app)
+          .post(`/api/rooms/${code}/upload-url`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(payload);
+
+        expect(res.status).toBe(200);
+        expect(res.body.uploadUrl).toBeTruthy();
+      }
     });
 
     it('should sanitize dangerous filenames', async () => {

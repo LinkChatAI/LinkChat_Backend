@@ -20,6 +20,7 @@ export interface Room {
     coHostIds?: string[];
     slowModeMessagesPerMinute?: number;
     participantsCanSend?: boolean;
+    joinLocked?: boolean;
     storageUsed?: number;
 }
 export interface Message {

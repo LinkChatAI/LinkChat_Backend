@@ -1,5 +1,6 @@
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
+import { isRateLimitExempt } from '../utils/rateLimitExempt.js';
 const RATE_LIMITS = {
     createRoom: {
         windowMs: 60 * 1000, // 1 minute
@@ -44,6 +45,10 @@ const RATE_LIMITS = {
 };
 export const rateLimiter = (type = 'default') => {
     return async (req, res, next) => {
+        if (isRateLimitExempt(req)) {
+            next();
+            return;
+        }
         const config = RATE_LIMITS[type] || RATE_LIMITS.default;
         const redis = getRedisClient();
         // If Redis is not available, skip rate limiting (fail open)

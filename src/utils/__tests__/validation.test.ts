@@ -39,10 +39,15 @@ describe('File Validation', () => {
       expect(result.error).toContain('exceeds maximum');
     });
 
-    it('should reject invalid MIME types', () => {
-      const result = validateFileUpload('script.exe', 'application/x-msdownload', 1024);
-      expect(result.valid).toBe(false);
-      expect(result.error).toContain('not allowed');
+    it('should accept APK and XML files', () => {
+      expect(validateFileUpload('app.apk', 'application/vnd.android.package-archive', 1024).valid).toBe(true);
+      expect(validateFileUpload('data.xml', 'application/xml', 1024).valid).toBe(true);
+      expect(validateFileUpload('sheet.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 2048).valid).toBe(true);
+    });
+
+    it('should accept executables and unknown extensions as octet-stream', () => {
+      expect(validateFileUpload('setup.exe', 'application/x-msdownload', 1024).valid).toBe(true);
+      expect(validateFileUpload('unknown.xyz', '', 1024).valid).toBe(true);
     });
 
     it('should infer MIME type from extension when missing', () => {
@@ -81,9 +86,11 @@ describe('File Validation', () => {
       expect(validateMimeType('application/vnd.openxmlformats-officedocument.presentationml.presentation').valid).toBe(true);
     });
 
-    it('should reject executable files', () => {
-      expect(validateMimeType('application/x-msdownload').valid).toBe(false);
-      expect(validateMimeType('application/x-executable').valid).toBe(false);
+    it('should accept application and text MIME families', () => {
+      expect(validateMimeType('application/x-msdownload').valid).toBe(true);
+      expect(validateMimeType('application/vnd.android.package-archive').valid).toBe(true);
+      expect(validateMimeType('application/xml').valid).toBe(true);
+      expect(validateMimeType('text/xml').valid).toBe(true);
     });
   });
 

@@ -21,6 +21,7 @@ export interface Room {
   coHostIds?: string[];
   slowModeMessagesPerMinute?: number;
   participantsCanSend?: boolean; // false = only host/co-hosts can send
+  joinLocked?: boolean; // true = no new participants can join
   storageUsed?: number; // Total storage used in bytes
 }
 

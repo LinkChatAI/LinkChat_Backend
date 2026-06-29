@@ -336,6 +336,16 @@ export const setParticipantsCanSend = async (code, canSend) => {
     }
     return room.toObject();
 };
+export const setJoinLocked = async (code, locked) => {
+    if (mongoose.connection.readyState !== 1) {
+        throw new Error('Database connection not available');
+    }
+    const room = await RoomModel.findOneAndUpdate({ code }, { joinLocked: locked }, { new: true });
+    if (!room) {
+        throw new Error('Room not found');
+    }
+    return room.toObject();
+};
 export const lockRoom = async (code) => {
     if (mongoose.connection.readyState !== 1) {
         logger.error('Database not connected when locking room');

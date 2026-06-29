@@ -7,6 +7,9 @@ import { logger } from '../utils/logger.js';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
 import { Server } from 'socket.io';
+import { clearRoomModeration } from './roomModerationService.js';
+import { clearSlowModeForRoom } from './slowModeService.js';
+import { clearRoomReceipts } from './readReceiptService.js';
 
 // Auto-vanish runs every 5 minutes for timely processing
 const AUTO_VANISH_INTERVAL_MS = parseInt(process.env.AUTO_VANISH_INTERVAL_MS || '300000', 10); // 5 minutes default
@@ -46,6 +49,11 @@ const permanentlyDeleteRoom = async (roomCode: string): Promise<void> => {
     } else {
       logger.info(`Deleted room ${roomCode}`);
     }
+
+    // 3b. Clear in-memory per-room state
+    clearRoomModeration(roomCode);
+    clearSlowModeForRoom(roomCode);
+    clearRoomReceipts(roomCode);
 
     // 4. Clean up Redis if available
     const redis = getRedisClient();

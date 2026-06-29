@@ -9,6 +9,16 @@ import { RoomModel } from '../../models/Room.js';
 import { emitAdminInsightUpdate } from '../adminHandlers.js';
 import { HandlerContext } from './types.js';
 import { clearScreenShareState } from '../screenShareState.js';
+import { clearRoomModeration } from '../../services/roomModerationService.js';
+import { clearSlowModeForRoom } from '../../services/slowModeService.js';
+import { clearRoomReceipts } from '../../services/readReceiptService.js';
+
+const clearAllRoomState = (roomCode: string): void => {
+  clearScreenShareState(roomCode);
+  clearRoomModeration(roomCode);
+  clearSlowModeForRoom(roomCode);
+  clearRoomReceipts(roomCode);
+};
 import { handleScreenShareParticipantLeft, stopScreenSharePresentation } from '../screenShareService.js';
 
 const getRedis = () => getRedisClient();
@@ -48,7 +58,7 @@ const destroyRoomAfterGracePeriod = async (io: Server, roomCode: string, adminUs
     try {
       const systemMessage = await createMessage(
         roomCode, 'system', 'System',
-        'Admin disconnected. Room closed after grace period.', 'text'
+        'Host did not return within 1 hour. Room has been closed.', 'text'
       );
       io.to(roomCode).emit('newMessage', systemMessage);
     } catch (msgError: any) {
@@ -72,15 +82,20 @@ const destroyRoomAfterGracePeriod = async (io: Server, roomCode: string, adminUs
     const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
     logger.info(`Deleted room ${roomCode} after grace period`, { deleted: roomDeleteResult.deletedCount });
 
-    clearScreenShareState(roomCode);
+    clearAllRoomState(roomCode);
 
     io.to(roomCode).emit('room_vanished', {
-      reason: 'Admin disconnected. Room closed after grace period.',
+      reason: 'Host did not return within 1 hour. Room has been closed.',
       roomId: roomCode,
       vanishedBy: adminUserId,
     });
 
+    // Collect user IDs BEFORE disconnecting so Redis cleanup can find them
     const socketsInRoom = await io.in(roomCode).fetchSockets();
+    const userIdsToClean = socketsInRoom
+      .map((s: any) => s.data?.user?.userId as string | undefined)
+      .filter((id): id is string => !!id);
+
     for (const socketInRoom of socketsInRoom) {
       socketInRoom.leave(roomCode);
     }
@@ -90,12 +105,8 @@ const destroyRoomAfterGracePeriod = async (io: Server, roomCode: string, adminUs
     if (redis && isRedisAvailable()) {
       try {
         await redis.del(`room:${roomCode}:users`);
-        const socketsForRedis = await io.in(roomCode).fetchSockets();
-        for (const socketInRoom of socketsForRedis) {
-          const socketUser = (socketInRoom as any).data?.user;
-          if (socketUser?.userId) {
-            await redis.del(`user:${socketUser.userId}`);
-          }
+        for (const uid of userIdsToClean) {
+          await redis.del(`user:${uid}`);
         }
         logger.info(`Cleaned up Redis data for room ${roomCode} after grace period`);
       } catch (redisError: any) {
@@ -234,21 +245,31 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
       const room = await getRoomByCode(roomId);
 
       if (room && room.ownerId && room.ownerId === authUserId && !room.isLocked && !room.isEnded) {
-        logger.info(`Admin ${authUserId} leaving room ${roomId} - locking room for 24h`);
-        await lockRoom(roomId);
+        // Admin intentionally leaving — start 1-hour grace period (same as disconnect).
+        // Room is NOT locked; admin can rejoin within 1 hour and resume as host.
+        logger.info(`Admin ${authUserId} leaving room ${roomId} - starting 1-hour grace period`);
+        clearPendingDeletionTimer(roomId);
 
-        io.to(roomId).emit('room_locked', {
-          roomId,
-          lockedAt: new Date().toISOString(),
-        });
-
-        stopScreenSharePresentation(io, roomId, authUserId, 'Room was locked by the host');
-
-        emitAdminInsightUpdate(io, 'room_locked', { roomCode: roomId }).catch(err => {
-          logger.warn('Failed to emit admin insight update for room locked', {
-            error: err instanceof Error ? err.message : String(err),
+        const gracePeriodMs = 3_600_000; // 1 hour
+        const capturedRoomId = roomId;
+        const timer = setTimeout(() => {
+          destroyRoomAfterGracePeriod(io, capturedRoomId, authUserId).catch(err => {
+            logger.error('Error in destroyRoomAfterGracePeriod (leave_room)', {
+              error: err instanceof Error ? err.message : String(err),
+            });
           });
+        }, gracePeriodMs);
+        pendingDeletionTimers.set(capturedRoomId, timer);
+
+        stopScreenSharePresentation(io, roomId, authUserId, 'Host left the room');
+
+        io.to(roomId).emit('adminOffline', {
+          roomId,
+          message: 'Host has left. Room will close in 1 hour if host does not return.',
+          gracePeriodSeconds: 3600,
         });
+
+        logger.info(`Grace period timer started for room ${roomId}, expires in 1 hour`);
       }
 
       await handleUserLeaveRoom(roomId, user.userId, true);
@@ -272,6 +293,17 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
   });
 
   socket.on('disconnect', async () => {
+    // Clear any pending typing timers for this user to avoid post-disconnect broadcasts
+    const typingKey = `${user.roomCode}:${user.userId}`;
+    const typingTimer = ctx.typingUsers.get(typingKey);
+    if (typingTimer) {
+      clearTimeout(typingTimer);
+      ctx.typingUsers.delete(typingKey);
+      if (user.roomCode) {
+        socket.to(user.roomCode).emit('userStoppedTyping', { userId: user.userId });
+      }
+    }
+
     if (user.roomCode) {
       logger.debug(`User ${user.userId} disconnecting from room ${user.roomCode}`);
       try {
@@ -279,27 +311,29 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         const room = await getRoomByCode(user.roomCode);
 
         if (room && room.ownerId && room.ownerId === authUserId && !room.isLocked && !room.isEnded) {
-          logger.info(`Admin ${authUserId} disconnected from room ${user.roomCode} - starting 2-minute grace period`);
+          logger.info(`Admin ${authUserId} disconnected from room ${user.roomCode} - starting 1-hour grace period`);
           clearPendingDeletionTimer(user.roomCode);
 
-          const gracePeriodMs = 120000;
+          // Capture by value before user.roomCode is cleared below
+          const roomCodeForTimer = user.roomCode;
+          const gracePeriodMs = 3_600_000; // 1 hour — admin can rejoin and resume as host
           const timer = setTimeout(() => {
-            destroyRoomAfterGracePeriod(io, user.roomCode, authUserId).catch(err => {
+            destroyRoomAfterGracePeriod(io, roomCodeForTimer, authUserId).catch(err => {
               logger.error('Error in destroyRoomAfterGracePeriod', {
                 error: err instanceof Error ? err.message : String(err),
               });
             });
           }, gracePeriodMs);
 
-          pendingDeletionTimers.set(user.roomCode, timer);
+          pendingDeletionTimers.set(roomCodeForTimer, timer);
 
-          io.to(user.roomCode).emit('adminOffline', {
-            roomId: user.roomCode,
-            message: 'Admin disconnected. Room will close in 2 minutes if admin does not reconnect.',
-            gracePeriodSeconds: 120,
+          io.to(roomCodeForTimer).emit('adminOffline', {
+            roomId: roomCodeForTimer,
+            message: 'Host disconnected. Room will close in 1 hour if host does not return.',
+            gracePeriodSeconds: 3600,
           });
 
-          logger.info(`Grace period timer started for room ${user.roomCode}, will expire in ${gracePeriodMs}ms`);
+          logger.info(`Grace period timer started for room ${roomCodeForTimer}, expires in 1 hour`);
         } else {
           await handleUserLeaveRoom(user.roomCode, user.userId, false);
         }
@@ -320,6 +354,12 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
       return;
     }
     try {
+      const room = await getRoomByCode(user.roomCode);
+      const authUserId = socket.handshake.auth?.userId || user.userId;
+      if (!room || !room.ownerId || room.ownerId !== authUserId) {
+        socket.emit('error', { message: 'Unauthorized: Only the room creator can end the room' });
+        return;
+      }
       const { endRoom } = await import('../../services/roomService.js');
       await endRoom(user.roomCode, data.userId);
       io.to(user.roomCode).emit('roomEnded', { endedBy: data.userId });
@@ -416,7 +456,7 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
       const roomDeleteResult = await RoomModel.deleteOne({ code: targetRoomId });
       logger.info(`Deleted room ${targetRoomId}`, { deleted: roomDeleteResult.deletedCount });
 
-      clearScreenShareState(targetRoomId);
+      clearAllRoomState(targetRoomId);
 
       io.to(targetRoomId).emit('room_vanished', {
         reason: 'The owner has vanished the room.',
@@ -424,7 +464,12 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         vanishedBy: user.userId,
       });
 
+      // Collect user IDs BEFORE disconnecting so Redis cleanup can find them
       const socketsInRoom = await io.in(targetRoomId).fetchSockets();
+      const userIdsToClean = socketsInRoom
+        .map((s: any) => s.data?.user?.userId as string | undefined)
+        .filter((id): id is string => !!id);
+
       for (const socketInRoom of socketsInRoom) {
         socketInRoom.leave(targetRoomId);
       }
@@ -434,10 +479,8 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
       if (redis && isRedisAvailable()) {
         try {
           await redis.del(`room:${targetRoomId}:users`);
-          const socketsForRedis = await io.in(targetRoomId).fetchSockets();
-          for (const socketInRoom of socketsForRedis) {
-            const socketUser = (socketInRoom as any).data?.user;
-            if (socketUser?.userId) await redis.del(`user:${socketUser.userId}`);
+          for (const uid of userIdsToClean) {
+            await redis.del(`user:${uid}`);
           }
           logger.info(`Cleaned up Redis data for room ${targetRoomId}`);
         } catch (redisError: any) {
@@ -519,7 +562,7 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
       const roomDeleteResult = await RoomModel.deleteOne({ code: targetRoomId });
       logger.info(`Deleted room ${targetRoomId}`, { deleted: roomDeleteResult.deletedCount });
 
-      clearScreenShareState(targetRoomId);
+      clearAllRoomState(targetRoomId);
 
       io.to(targetRoomId).emit('room_destroyed', {
         reason: 'Host ended the meeting',
@@ -662,7 +705,7 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         }
       }
 
-      clearScreenShareState(targetRoomId);
+      clearAllRoomState(targetRoomId);
 
       io.to(targetRoomId).emit('room_terminated', {
         reason: 'Host ended the session',

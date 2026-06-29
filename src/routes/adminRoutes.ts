@@ -152,6 +152,16 @@ router.get(
   getContactSubmissions
 );
 
+// Lightweight connectivity check for admin login
+router.get(
+  '/ping',
+  rateLimiter('adminInsight'),
+  auditAdminAction('admin_ping'),
+  (_req, res) => {
+    res.json({ ok: true, timestamp: new Date().toISOString() });
+  }
+);
+
 // Debug endpoint for verification
 router.get(
   '/debug-stats',

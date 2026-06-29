@@ -266,6 +266,34 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
 
         if (data.tempId) (message as any).tempId = data.tempId;
       } else {
+        // Deduplicate text messages by client tempId (prevents retry double-inserts)
+        if (data.tempId) {
+          const redis = getRedisClient();
+          if (redis && isRedisAvailable()) {
+            try {
+              const dedupKey = `msg:dedup:${user.roomCode}:${data.tempId}`;
+              const setResult = await redis.set(dedupKey, '1', 'EX', 30, 'NX');
+              if (!setResult) {
+                // Already processed this tempId — find and re-broadcast the existing message
+                const existing = await MessageModel.findOne({
+                  roomCode: user.roomCode,
+                  userId: user.userId,
+                  createdAt: { $gte: new Date(Date.now() - 30000) },
+                }).sort({ createdAt: -1 }).lean();
+                if (existing) {
+                  const existingMsg = normalizeMessageType(existing as any);
+                  (existingMsg as any).tempId = data.tempId;
+                  io.to(user.roomCode).emit('newMessage', existingMsg);
+                  if (ack) ack({ success: true, messageId: existingMsg.id });
+                  return;
+                }
+              }
+            } catch (redisErr) {
+              // Redis error — continue with normal insert (dedup is best-effort)
+              logger.warn('Text dedup Redis check failed (non-critical)', { error: String(redisErr) });
+            }
+          }
+        }
         message = await createMessage(
           user.roomCode, user.userId, user.nickname, content, 'text',
           undefined, data.replyTo, avatar

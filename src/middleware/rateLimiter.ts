@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
+import { isRateLimitExempt } from '../utils/rateLimitExempt.js';
 
 interface RateLimitConfig {
   windowMs: number;
@@ -53,6 +54,11 @@ const RATE_LIMITS: Record<string, RateLimitConfig> = {
 
 export const rateLimiter = (type: string = 'default') => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    if (isRateLimitExempt(req)) {
+      next();
+      return;
+    }
+
     const config = RATE_LIMITS[type] || RATE_LIMITS.default;
     const redis = getRedisClient();
     

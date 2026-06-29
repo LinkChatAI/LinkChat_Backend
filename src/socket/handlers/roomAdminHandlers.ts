@@ -5,6 +5,7 @@ import {
   removeRoomCoHost,
   setRoomSlowMode,
   setParticipantsCanSend,
+  setJoinLocked,
 } from '../../services/roomService.js';
 import { canManageRoom, canModerateRoom } from '../../services/roomPermissionService.js';
 import { logger } from '../../utils/logger.js';
@@ -17,6 +18,7 @@ const emitRoomSettings = (io: HandlerContext['io'], roomCode: string, room: Room
     coHostIds: room.coHostIds || [],
     slowModeMessagesPerMinute: room.slowModeMessagesPerMinute ?? 0,
     participantsCanSend: room.participantsCanSend !== false,
+    joinLocked: room.joinLocked === true,
   });
 };
 
@@ -146,6 +148,28 @@ export const registerRoomAdminHandlers = (ctx: HandlerContext): void => {
       });
     } catch {
       socket.emit('error', { message: 'Failed to update messaging permissions' });
+    }
+  });
+
+  socket.on('updateJoinLocked', async (data: { locked: boolean }) => {
+    if (!ensureUserInRoom() || data?.locked === undefined) return;
+    const authUserId = socket.handshake.auth?.userId || user.userId;
+    const room = await getRoomByCode(user.roomCode);
+    if (!canManageRoom(room, authUserId)) {
+      socket.emit('error_unauthorized', { message: 'Only the host can control room access' });
+      return;
+    }
+
+    try {
+      const updated = await setJoinLocked(user.roomCode, !!data.locked);
+      emitRoomSettings(io, user.roomCode, updated);
+      io.to(user.roomCode).emit('joinLockedUpdated', {
+        roomId: user.roomCode,
+        locked: updated.joinLocked === true,
+      });
+      logger.info('Join lock updated', { roomCode: user.roomCode, locked: updated.joinLocked });
+    } catch {
+      socket.emit('error', { message: 'Failed to update join lock' });
     }
   });
 };

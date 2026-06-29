@@ -20,10 +20,12 @@ import fileRoutes from './routes/fileRoutes.js';
 import linkPreviewRoutes from './routes/linkPreviewRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
+import toolsRoutes from './routes/toolsRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startCleanupJob } from './services/cleanupService.js';
 import { logger } from './utils/logger.js';
 import { env } from './config/env.js';
+import { isRateLimitExempt } from './utils/rateLimitExempt.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -31,22 +33,28 @@ const PORT = parseInt(process.env.PORT || '8080', 10);
 const getCorsOrigin = (): string | string[] => {
   const frontendUrl = env.FRONTEND_URL || env.BASE_URL;
   
-  // Require frontend URL to be set - no permissive fallbacks
-  if (!frontendUrl) {
-    const errorMsg = 'FRONTEND_URL or BASE_URL must be set in environment variables for CORS configuration';
-    logger.error(errorMsg);
-    throw new Error(errorMsg);
+  const allowedOrigins: string[] = [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:5175',
+    'http://localhost:3000',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:5174',
+  ];
+
+  if (frontendUrl) {
+    if (frontendUrl.includes(',')) {
+      allowedOrigins.push(...frontendUrl.split(',').map(url => url.trim()).filter(Boolean));
+    } else {
+      allowedOrigins.push(frontendUrl);
+    }
   }
+
+  // Deduplicate
+  const uniqueOrigins = [...new Set(allowedOrigins)];
+  logger.info(`CORS configured for origins: ${uniqueOrigins.join(', ')}`);
   
-  // Support comma-separated list of origins (for multiple environments)
-  if (frontendUrl.includes(',')) {
-    const origins = frontendUrl.split(',').map(url => url.trim()).filter(Boolean);
-    logger.info(`CORS configured for multiple origins: ${origins.join(', ')}`);
-    return origins;
-  }
-  
-  logger.info(`CORS configured for frontend: ${frontendUrl}`);
-  return frontendUrl;
+  return uniqueOrigins.length === 1 ? uniqueOrigins[0] : uniqueOrigins;
 };
 
 const corsOrigin = getCorsOrigin();
@@ -59,7 +67,7 @@ const io = new Server(httpServer, {
     methods: ['GET', 'POST'],
     credentials: true,
   },
-  pingTimeout: 60000,
+  pingTimeout: 90000,
   pingInterval: 25000,
   transports: ['websocket', 'polling'],
   maxHttpBufferSize: 15 * 1024 * 1024, // 15MB to accommodate 10MB files after base64 encoding (~33% overhead)
@@ -88,7 +96,12 @@ const globalLimiter = rateLimit({
   message: { error: "Too many requests from this IP, please try again later." },
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  skip: (req) => isRateLimitExempt(req),
 });
+
+if (isRateLimitExempt()) {
+  logger.info('Rate limiting disabled for local development');
+}
 
 // Apply global limiter to all API routes
 app.use('/api', globalLimiter);
@@ -101,6 +114,7 @@ const roomCreationLimiter = rateLimit({
   message: { error: "You are doing that too much. Chill for a bit." },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => isRateLimitExempt(req),
 });
 
 // File upload rate limiter — more lenient, normal chat usage sends many files
@@ -111,6 +125,7 @@ const uploadLimiter = rateLimit({
   message: { error: "Too many file uploads. Please slow down." },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => isRateLimitExempt(req),
 });
 
 // Apply limits to specific heavy routes
@@ -255,6 +270,7 @@ app.use('/', seoRoutes);
 
 // API routes
 app.use('/api/auth', authRoutes);
+app.use('/api/tools', toolsRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/nickname', nicknameRoutes);
@@ -269,6 +285,7 @@ const linkPreviewLimiter = rateLimit({
   message: { error: 'Too many link preview requests. Please slow down.' },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => isRateLimitExempt(req),
 });
 app.use('/api/link-preview', linkPreviewLimiter, linkPreviewRoutes);
 
@@ -277,14 +294,21 @@ app.use(errorHandler);
 io.on('connection', async (socket) => {
   logger.debug('Socket connected', { socketId: socket.id });
   
-  // Check if this is an admin connection
+  // Admin dashboard socket (separate from room chat sockets)
   const adminSecret = socket.handshake.auth?.adminSecret || socket.handshake.query?.adminSecret;
-  if (adminSecret && adminSecret === env.ADMIN_SECRET) {
-    const { handleAdminSocketConnection } = await import('./socket/adminHandlers.js');
-    handleAdminSocketConnection(io, socket);
-  } else {
-    handleSocketConnection(io, socket);
+  if (adminSecret) {
+    if (env.ADMIN_SECRET && adminSecret === env.ADMIN_SECRET) {
+      const { handleAdminSocketConnection } = await import('./socket/adminHandlers.js');
+      handleAdminSocketConnection(io, socket);
+    } else {
+      logger.warn('Rejected admin socket: invalid secret', { socketId: socket.id });
+      socket.emit('error', { message: 'Unauthorized admin connection' });
+      socket.disconnect(true);
+    }
+    return;
   }
+
+  handleSocketConnection(io, socket);
 });
 
 let cleanupJobInterval: NodeJS.Timeout | null = null;

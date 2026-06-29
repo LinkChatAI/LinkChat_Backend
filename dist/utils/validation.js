@@ -92,23 +92,36 @@ const inferMimeTypeFromExtension = (fileName) => {
         // Images
         'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
         'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
+        'heic': 'image/heic', 'heif': 'image/heif', 'bmp': 'image/bmp',
         // Documents
         'pdf': 'application/pdf', 'doc': 'application/msword',
         'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         'xls': 'application/vnd.ms-excel',
         'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
+        'ods': 'application/vnd.oasis.opendocument.spreadsheet',
+        'csv': 'text/csv', 'tsv': 'text/tab-separated-values',
         'ppt': 'application/vnd.ms-powerpoint',
         'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        'txt': 'text/plain', 'html': 'text/html', 'htm': 'text/html', 'csv': 'text/csv', 'xml': 'text/xml',
-        'json': 'application/json',
+        'odp': 'application/vnd.oasis.opendocument.presentation',
+        'odt': 'application/vnd.oasis.opendocument.text',
+        'txt': 'text/plain', 'md': 'text/markdown', 'rtf': 'application/rtf',
+        'html': 'text/html', 'htm': 'text/html', 'xml': 'application/xml',
+        'json': 'application/json', 'yaml': 'text/yaml', 'yml': 'text/yaml',
         // Archives
         'zip': 'application/zip', 'rar': 'application/x-rar-compressed',
-        // Executables
-        'exe': 'application/x-msdownload',
-        // Subtitle files
-        'srt': 'application/x-subrip',
+        '7z': 'application/x-7z-compressed', 'tar': 'application/x-tar', 'gz': 'application/gzip',
+        // Apps / installers
+        'apk': 'application/vnd.android.package-archive',
+        'aab': 'application/x-authorware-bin',
+        'ipa': 'application/octet-stream',
+        'exe': 'application/x-msdownload', 'msi': 'application/x-msdownload',
+        'dmg': 'application/x-apple-diskimage',
+        // Subtitle / misc
+        'srt': 'application/x-subrip', 'vtt': 'text/vtt',
         // Audio/Video
-        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'mp4': 'video/mp4', 'webm': 'video/webm',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'm4a': 'audio/mp4',
+        'mp4': 'video/mp4', 'webm': 'video/webm', 'mov': 'video/quicktime', 'mkv': 'video/x-matroska',
     };
     return mimeMap[ext] || null;
 };
@@ -122,25 +135,25 @@ export const validateMimeType = (mimeType, fileName) => {
         // This ensures the signed URL matches what the browser will send
     }
     else if (!mimeType && fileName) {
-        // Only infer if MIME type is empty (not provided)
         const inferred = inferMimeTypeFromExtension(fileName);
-        if (inferred && ALLOWED_MIME_TYPES.includes(inferred)) {
-            return { valid: true, inferredMimeType: inferred };
-        }
+        return {
+            valid: true,
+            inferredMimeType: inferred || 'application/octet-stream',
+        };
     }
-    // Validate provided MIME type
-    // We allow the type IF:
-    // 1. It's in the allowed list, OR
-    // 2. It starts with 'image/', 'video/', or 'audio/' (browsers handle these well), OR
-    // 3. It's 'application/octet-stream' (universal fallback for binary files)
-    const isAllowed = mimeType && (ALLOWED_MIME_TYPES.includes(mimeType) ||
-        mimeType.startsWith('image/') ||
-        mimeType.startsWith('video/') ||
-        mimeType.startsWith('audio/'));
+    // Allow common browser media types, documents, archives, apps (apk, exe), and generic binaries
+    const isAllowed = Boolean(mimeType &&
+        (ALLOWED_MIME_TYPES.includes(mimeType) ||
+            mimeType.startsWith('image/') ||
+            mimeType.startsWith('video/') ||
+            mimeType.startsWith('audio/') ||
+            mimeType.startsWith('text/') ||
+            mimeType.startsWith('application/') ||
+            mimeType === 'application/octet-stream'));
     if (!isAllowed) {
         return {
             valid: false,
-            error: `File type ${mimeType || 'unknown'} is not allowed. Allowed types: images, documents, archives, audio/video.`,
+            error: `File type ${mimeType || 'unknown'} is not allowed.`,
         };
     }
     return { valid: true };
