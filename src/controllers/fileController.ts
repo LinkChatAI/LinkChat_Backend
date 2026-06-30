@@ -61,7 +61,10 @@ const reserveRoomStorage = async (
 
   const room = await RoomModel.findOne({ code: roomCode });
   if (!room) {
-    return { ok: false, status: 404, body: { error: 'Room not found' } };
+    // Room might be ephemeral, just created, or DB reset in dev — skip storage tracking
+    // rather than blocking the upload entirely.
+    logger.warn('Room not found for storage accounting, proceeding without tracking', { roomCode });
+    return { ok: true };
   }
 
   const storageLimit = getStorageLimitForPlan(room.plan as string | undefined);
@@ -105,7 +108,7 @@ const respondLocalUpload = async (
     roomCode || 'shared',
     sanitizedFileName
   );
-  const publicUrl = `${getBackendUrl()}/uploads/${filePath}`;
+  const publicUrl = `${getBackendUrl()}/api/uploads/${filePath}`;
 
   recordUploadLocal();
   res.json({ uploadUrl, publicUrl, storagePath: filePath, isLocal: true });

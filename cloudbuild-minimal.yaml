@@ -39,8 +39,13 @@ steps:
       - '8080'
       - '--memory'
       - '512Mi'
+      # WebSocket is one long-lived request; 300s killed every socket after
+      # 5 min. 3600s (Cloud Run max) lets it live an hour. Keep one instance warm.
       - '--timeout'
-      - '300'
+      - '3600'
+      - '--min-instances'
+      - '1'
+      - '--session-affinity'
       - '--set-env-vars'
       - 'PORT=8080,NODE_ENV=production'
 

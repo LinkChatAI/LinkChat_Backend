@@ -85,7 +85,7 @@ export const generateLocalUploadUrl = async (
 };
 
 const getLocalFileUrl = (filePath: string): string =>
-  `${getBackendUrl()}/uploads/${filePath}`;
+  `${getBackendUrl()}/api/uploads/${filePath}`;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 

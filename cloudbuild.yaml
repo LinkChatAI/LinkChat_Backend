@@ -42,12 +42,20 @@ steps:
       - '512Mi'
       - '--cpu'
       - '1'
+      # Keep one instance warm so an active WebSocket's instance is never scaled
+      # to zero (which would kill the connection and drop the Socket.IO session).
       - '--min-instances'
-      - '0'
+      - '1'
       - '--max-instances'
       - '10'
+      # A WebSocket is a single long-lived HTTP request; Cloud Run's request
+      # timeout applies to it. 300s force-closed every socket after 5 minutes.
+      # 3600s (the Cloud Run max) lets connections live an hour before a refresh.
       - '--timeout'
-      - '300'
+      - '3600'
+      # Best-effort sticky sessions. Harmless with websocket-only, but protects
+      # any polling handshake that still occurs (e.g. a dev client hitting prod).
+      - '--session-affinity'
       - '--set-env-vars'
       - 'PORT=8080,NODE_ENV=production'
 

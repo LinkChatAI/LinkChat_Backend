@@ -28,14 +28,17 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
   const { io, socket, user, ensureUserInRoom, emitErrorAlert, typingUsers } = ctx;
 
   socket.on('sync_messages', async (
-    data: { lastMessageId?: string },
+    data: { lastMessageId?: string; roomCode?: string },
     ack?: (response: { success: boolean; messages?: Message[]; error?: string }) => void,
   ) => {
     try {
-      if (!ensureUserInRoom()) {
-        const errorMsg = 'Not in a room';
-        socket.emit('error_alert', { message: errorMsg });
-        if (ack) ack({ success: false, error: errorMsg });
+      // On reconnect the client emits sync_messages before joinRoom is processed,
+      // so user.roomCode may not be set yet. Accept roomCode from the data payload
+      // as a fallback (the client always sends it). Fail silently (no error_alert)
+      // in that case so no toast appears during normal reconnection flow.
+      const targetRoomCode = user.roomCode || (typeof data?.roomCode === 'string' ? data.roomCode.trim() : '');
+      if (!targetRoomCode) {
+        if (ack) ack({ success: false, error: 'Not in a room' });
         return;
       }
 
@@ -46,7 +49,7 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
         return;
       }
 
-      const messages = await getMessagesAfterId(user.roomCode, data?.lastMessageId);
+      const messages = await getMessagesAfterId(targetRoomCode, data?.lastMessageId);
       const normalizedMessages = stripHeavyContentForJoin(messages);
       socket.emit('messages_synced', { messages: normalizedMessages });
 
