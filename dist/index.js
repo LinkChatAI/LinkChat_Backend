@@ -31,8 +31,11 @@ const getCorsOrigin = () => {
     const frontendUrl = env.FRONTEND_URL || env.BASE_URL;
     const allowedOrigins = [
         'http://localhost:5173',
+        'http://localhost:5174',
+        'http://localhost:5175',
         'http://localhost:3000',
         'http://127.0.0.1:5173',
+        'http://127.0.0.1:5174',
     ];
     if (frontendUrl) {
         if (frontendUrl.includes(',')) {
@@ -51,6 +54,9 @@ const corsOrigin = getCorsOrigin();
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
+    // Custom path avoids ad-blocker / browser-extension rules that specifically
+    // target the default "/socket.io/" pattern.
+    path: '/ws',
     cors: {
         origin: corsOrigin,
         methods: ['GET', 'POST'],
@@ -58,8 +64,20 @@ const io = new Server(httpServer, {
     },
     pingTimeout: 90000,
     pingInterval: 25000,
+    // Server accepts both transports. The production client uses websocket-only
+    // (see frontend/src/services/socket.ts) to avoid the HTTP long-polling
+    // "Session ID unknown" 400 errors on multi-instance Cloud Run, where polling
+    // requests for one session can land on a different instance. Local dev keeps
+    // polling as a fallback against a single backend instance.
     transports: ['websocket', 'polling'],
     maxHttpBufferSize: 15 * 1024 * 1024, // 15MB to accommodate 10MB files after base64 encoding (~33% overhead)
+    // Restore session state (rooms + missed packets) after a brief disconnect
+    // instead of forcing a full rejoin. Smooths over mobile tab freezes and
+    // momentary network blips. Works across instances via the Redis adapter.
+    connectionStateRecovery: {
+        maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+        skipMiddlewares: true,
+    },
 });
 // Export io instance for use in other modules
 import { setIoInstance } from './socket/ioInstance.js';
@@ -131,12 +149,15 @@ app.use('/api/uploads', express.raw({
         next();
     }
 });
-// Serve uploaded files (local fallback)
+// Serve uploaded files (local fallback) — available at both /uploads/ and /api/uploads/
+// /api/uploads/ is used by the Vite dev proxy so images load without hitting the backend port directly.
 import path from 'path';
 import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+const localUploadsDir = path.join(__dirname, '../uploads');
+app.use('/uploads', express.static(localUploadsDir));
+app.use('/api/uploads', express.static(localUploadsDir));
 // Request timeout middleware
 app.use((req, res, next) => {
     req.setTimeout(30000, () => {
@@ -273,6 +294,80 @@ io.on('connection', async (socket) => {
 });
 let cleanupJobInterval = null;
 let autoVanishInterval = null;
+let adapterPubClient = null;
+let adapterSubClient = null;
+// Wire the Socket.IO Redis adapter so broadcasts (newMessage, etc.) reach
+// clients connected to OTHER Cloud Run instances. Without this, a message sent
+// on instance A is never delivered to a user on instance B. Falls back silently
+// to the in-memory adapter (single-instance) when Redis is unavailable.
+const setupRedisAdapter = async () => {
+    // The Redis adapter only matters when running multiple instances (production
+    // on Cloud Run). Local dev is a single instance, so skip it entirely and
+    // avoid the startup connection attempt / log noise. Set REDIS_ADAPTER=1 to
+    // force it on in development (e.g. to test multi-instance locally).
+    const wantAdapter = process.env.NODE_ENV === 'production' || process.env.REDIS_ADAPTER === '1';
+    if (!wantAdapter) {
+        logger.info('Socket.IO using in-memory adapter (development, single instance)');
+        return;
+    }
+    if (!env.REDIS_URL) {
+        logger.warn('REDIS_URL not set — Socket.IO using in-memory adapter (safe only for a single instance)');
+        return;
+    }
+    try {
+        const { createAdapter } = await import('@socket.io/redis-adapter');
+        const { default: Redis } = await import('ioredis');
+        const RedisClass = Redis;
+        // lazyConnect so we can verify reachability ONCE before wiring the adapter.
+        // Without this, an unreachable Redis (e.g. REDIS_URL set in local dev but no
+        // server running) makes ioredis retry every second forever and spam logs.
+        const clientOpts = {
+            lazyConnect: true,
+            enableOfflineQueue: false,
+            maxRetriesPerRequest: null, // recommended for the pub/sub clients
+            // Give up after ~5 quick attempts; we fall back to the in-memory adapter.
+            retryStrategy: (times) => (times > 5 ? null : Math.min(times * 200, 2000)),
+        };
+        adapterPubClient = new RedisClass(env.REDIS_URL, clientOpts);
+        adapterSubClient = new RedisClass(env.REDIS_URL, clientOpts);
+        // Suppress connection-refused noise (Redis is optional); these clients are
+        // torn down below if the initial connect fails.
+        const isConnRefused = (err) => ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'EAI_AGAIN'].includes(err?.code) ||
+            /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|getaddrinfo/i.test(err?.message || '');
+        adapterPubClient.on('error', (err) => {
+            if (!isConnRefused(err))
+                logger.error('Redis adapter pub client error', { error: err?.message || String(err) });
+        });
+        adapterSubClient.on('error', (err) => {
+            if (!isConnRefused(err))
+                logger.error('Redis adapter sub client error', { error: err?.message || String(err) });
+        });
+        // Verify both clients can actually connect before wiring the adapter.
+        await Promise.all([adapterPubClient.connect(), adapterSubClient.connect()]);
+        io.adapter(createAdapter(adapterPubClient, adapterSubClient));
+        logger.info('Socket.IO Redis adapter enabled (cross-instance broadcasting active)');
+    }
+    catch (error) {
+        // Redis unreachable — tear down the clients so they stop retrying, and run
+        // with the in-memory adapter. Fine for a single instance (local dev);
+        // multi-instance production must provide a reachable REDIS_URL.
+        logger.warn('Redis unreachable — Socket.IO using in-memory adapter (safe only for a single instance)', {
+            error: error instanceof Error ? error.message : String(error),
+        });
+        try {
+            if (adapterPubClient)
+                adapterPubClient.disconnect();
+        }
+        catch { /* ignore */ }
+        try {
+            if (adapterSubClient)
+                adapterSubClient.disconnect();
+        }
+        catch { /* ignore */ }
+        adapterPubClient = null;
+        adapterSubClient = null;
+    }
+};
 const startServer = () => {
     // Start server immediately - don't wait for anything
     // This ensures Cloud Run health checks pass
@@ -307,6 +402,12 @@ const startServer = () => {
         });
         // Don't exit - server can still serve health checks
         // Connection will retry automatically in connectDatabase function
+    });
+    // Wire the Redis adapter for multi-instance Socket.IO broadcasting (non-blocking)
+    setupRedisAdapter().catch((error) => {
+        logger.error('Redis adapter setup threw', {
+            error: error instanceof Error ? error.message : String(error),
+        });
     });
     // Start cleanup job (non-blocking)
     try {
@@ -350,6 +451,10 @@ const shutdown = async (signal) => {
     }
     try {
         await closeRedis();
+        if (adapterPubClient)
+            await adapterPubClient.quit().catch(() => { });
+        if (adapterSubClient)
+            await adapterSubClient.quit().catch(() => { });
         const mongoose = await import('mongoose');
         await mongoose.default.disconnect();
         logger.info('Database connections closed');

@@ -66,7 +66,7 @@ export const generateLocalUploadUrl = async (roomCode, fileName) => {
         .join('/')}`;
     return { uploadUrl, filePath };
 };
-const getLocalFileUrl = (filePath) => `${getBackendUrl()}/uploads/${filePath}`;
+const getLocalFileUrl = (filePath) => `${getBackendUrl()}/api/uploads/${filePath}`;
 // ─── Public API ───────────────────────────────────────────────────────────────
 /**
  * Generate an upload URL.

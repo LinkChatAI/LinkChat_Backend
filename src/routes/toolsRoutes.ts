@@ -76,7 +76,7 @@ router.get('/email-breach-check', breachLimiter, async (req: Request, res: Respo
 
     res.json({ breached: breaches.length > 0, breaches });
   } catch (err) {
-    logger.error('Email breach check failed', err);
+    logger.error('Email breach check failed', { error: err instanceof Error ? err.message : String(err) });
     res.status(502).json({ error: 'upstream_error', message: 'Could not check breaches right now.' });
   }
 });

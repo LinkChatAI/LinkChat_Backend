@@ -4,6 +4,9 @@ import { MessageModel } from '../models/Message.js';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { deleteRoomFiles } from './gcsService.js';
 import { logger } from '../utils/logger.js';
+import { clearRoomModeration } from './roomModerationService.js';
+import { clearSlowModeForRoom } from './slowModeService.js';
+import { clearRoomReceipts } from './readReceiptService.js';
 const CLEANUP_INTERVAL_MS = parseInt(process.env.CLEANUP_INTERVAL_MS || '3600000', 10); // 1 hour default
 export const cleanupExpiredRooms = async () => {
     // Check if database is connected
@@ -33,6 +36,12 @@ export const cleanupExpiredRooms = async () => {
             RoomModel.deleteMany({ expiresAt: { $lt: now } }),
             MessageModel.deleteMany({ roomCode: { $in: roomCodes } }),
         ]);
+        // Clear in-memory per-room state for expired rooms
+        for (const code of roomCodes) {
+            clearRoomModeration(code);
+            clearSlowModeForRoom(code);
+            clearRoomReceipts(code);
+        }
         // Clean up Redis if available
         const redis = getRedisClient();
         if (redis && isRedisAvailable()) {

@@ -60,6 +60,18 @@
     "lastmod": "2026-06-06"
   },
   {
+    "path": "/privacy-policy",
+    "changefreq": "yearly",
+    "priority": "0.3",
+    "lastmod": "2026-07-01"
+  },
+  {
+    "path": "/terms-of-service",
+    "changefreq": "yearly",
+    "priority": "0.3",
+    "lastmod": "2026-07-01"
+  },
+  {
     "path": "/blog",
     "changefreq": "weekly",
     "priority": "0.8",
@@ -192,25 +204,7 @@
     "lastmod": "2026-06-06"
   },
   {
-    "path": "/linkchat-iran-war",
-    "changefreq": "daily",
-    "priority": "0.7",
-    "lastmod": "2026-06-06"
-  },
-  {
-    "path": "/linkchat-rivian-r2",
-    "changefreq": "weekly",
-    "priority": "0.7",
-    "lastmod": "2026-06-06"
-  },
-  {
     "path": "/linkchat-usa",
-    "changefreq": "weekly",
-    "priority": "0.8",
-    "lastmod": "2026-06-06"
-  },
-  {
-    "path": "/linkchat-gta-6",
     "changefreq": "weekly",
     "priority": "0.8",
     "lastmod": "2026-06-06"
@@ -378,30 +372,6 @@
     "lastmod": "2026-06-04"
   },
   {
-    "path": "/blog/rivian-r2-2026-price-specs-release",
-    "changefreq": "weekly",
-    "priority": "0.7",
-    "lastmod": "2026-06-04"
-  },
-  {
-    "path": "/blog/gta-6-release-date-map-lucia-price-delay",
-    "changefreq": "weekly",
-    "priority": "0.7",
-    "lastmod": "2026-06-04"
-  },
-  {
-    "path": "/blog/2024-nissan-gtr-mclaren-senna-gtr-supercars",
-    "changefreq": "weekly",
-    "priority": "0.6",
-    "lastmod": "2026-06-04"
-  },
-  {
-    "path": "/blog/us-iran-war-news-live-discussion-chat",
-    "changefreq": "daily",
-    "priority": "0.7",
-    "lastmod": "2026-06-05"
-  },
-  {
     "path": "/blog/seo-services-free-tools-agency-chat",
     "changefreq": "monthly",
     "priority": "0.6",
@@ -430,11 +400,5 @@
     "changefreq": "weekly",
     "priority": "0.7",
     "lastmod": "2026-06-04"
-  },
-  {
-    "path": "/blog/gta-6-us-community-chat-rooms-guide",
-    "changefreq": "weekly",
-    "priority": "0.7",
-    "lastmod": "2026-06-06"
   }
 ]
