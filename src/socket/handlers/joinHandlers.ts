@@ -330,6 +330,24 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       const messages = await getRoomMessages(code);
       const normalizedMessages = stripHeavyContentForJoin(messages);
       const participants = await getOnlineParticipantSnapshots(io, code);
+
+      // Best-effort — a banner lookup failure should never block a room join.
+      let banner: { imageUrl: string; title?: string } | null = null;
+      try {
+        const { SponsorBannerModel } = await import('../../models/SponsorBanner.js');
+        const bannerDoc = await SponsorBannerModel.findOne({ roomCode: code })
+          .select('imageUrl title')
+          .lean();
+        if (bannerDoc) {
+          banner = { imageUrl: bannerDoc.imageUrl, title: bannerDoc.title };
+        }
+      } catch (bannerError: unknown) {
+        logger.warn('Failed to load room banner on join', {
+          error: bannerError instanceof Error ? bannerError.message : String(bannerError),
+          roomCode: code,
+        });
+      }
+
       socket.emit('roomJoined', {
         messages: normalizedMessages,
         userId: user.userId,
@@ -345,6 +363,7 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         storageUsed: activeRoom.storageUsed || 0,
         storageLimitBytes: getStorageLimitForPlan(activeRoom.plan as string | undefined),
         participants,
+        banner,
       });
       socket.to(code).emit('userJoined', { userId: user.userId, nickname: user.nickname });
 
@@ -364,13 +383,37 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       try {
         const { UserVisitModel } = await import('../../models/UserVisit.js');
         const { GlobalStatsModel } = await import('../../models/GlobalStats.js');
+        const { getSocketClientIp } = await import('../../utils/socketIp.js');
+        const { resolveGeoIp } = await import('../../services/geoIpService.js');
 
-        await UserVisitModel.create({
+        const visit = await UserVisitModel.create({
           userId: user.userId,
           roomCode: code,
           nickname: user.nickname,
           joinedAt: new Date(),
         });
+
+        // Resolve approximate (city-level) location from the public IP in the background —
+        // never blocks the join flow, and never uses browser GPS.
+        const clientIp = getSocketClientIp(socket);
+        resolveGeoIp(clientIp)
+          .then((geo) => {
+            if (!geo) return;
+            return UserVisitModel.findByIdAndUpdate(visit._id, {
+              ipAddress: geo.ip,
+              city: geo.city,
+              region: geo.region,
+              country: geo.country,
+              lat: geo.lat,
+              lon: geo.lon,
+            }).exec();
+          })
+          .catch((geoError: unknown) => {
+            logger.warn('GeoIP enrichment failed for user visit', {
+              error: geoError instanceof Error ? geoError.message : String(geoError),
+              userId: user.userId,
+            });
+          });
 
         await GlobalStatsModel.findOneAndUpdate(
           { key: 'totalVisitsLifetime' },

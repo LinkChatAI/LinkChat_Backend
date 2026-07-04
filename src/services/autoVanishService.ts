@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
+import { SponsorBannerModel } from '../models/SponsorBanner.js';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { deleteRoomFiles } from './gcsService.js';
 import { logger } from '../utils/logger.js';
@@ -42,6 +43,14 @@ const permanentlyDeleteRoom = async (roomCode: string): Promise<void> => {
     const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
     logger.debug(`Deleted ${messageDeleteResult.deletedCount} messages from room ${roomCode}`);
 
+    // 2b. Delete the room's sponsor/event banner, if any (its image lived under the
+    // room's own storage prefix, already removed by deleteRoomFiles above).
+    await SponsorBannerModel.deleteOne({ roomCode }).catch((bannerError: unknown) => {
+      logger.warn(`Failed to delete sponsor banner for room ${roomCode} (non-critical)`, {
+        error: bannerError instanceof Error ? bannerError.message : String(bannerError),
+      });
+    });
+
     // 3. Delete the room
     const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
     if (roomDeleteResult.deletedCount === 0) {
@@ -59,15 +68,16 @@ const permanentlyDeleteRoom = async (roomCode: string): Promise<void> => {
     const redis = getRedisClient();
     if (redis && isRedisAvailable()) {
       try {
-        await redis.del(`room:${roomCode}:users`);
-        // Clean up user entries that reference this room
-        const keys = await redis.keys('user:*');
-        for (const key of keys) {
-          const userRoomCode = await redis.hget(key, 'roomCode');
+        // Use the room's member set as a reverse index instead of scanning
+        // the whole keyspace with KEYS (O(all users) and blocks Redis).
+        const userIds = await redis.smembers(`room:${roomCode}:users`);
+        for (const uid of userIds) {
+          const userRoomCode = await redis.hget(`user:${uid}`, 'roomCode');
           if (userRoomCode === roomCode) {
-            await redis.del(key);
+            await redis.del(`user:${uid}`);
           }
         }
+        await redis.del(`room:${roomCode}:users`);
         logger.debug(`Cleaned up Redis data for room ${roomCode}`);
       } catch (redisError: any) {
         logger.warn('Redis cleanup failed (non-critical)', {

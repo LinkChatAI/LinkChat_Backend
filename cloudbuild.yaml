@@ -22,17 +22,21 @@ steps:
       - 'push'
       - 'gcr.io/$PROJECT_ID/linkchat-backend:latest'
 
-  # Deploy container image to Cloud Run
+  # Deploy container image to Cloud Run.
+  # NOTE: the live production service is `linkroom-backend` in asia-south1
+  # (project linkchat-480712) — the service Netlify proxies to. This file
+  # previously deployed a `linkchat-backend` service in us-central1 that does
+  # not exist in production, so none of these settings ever reached prod.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'linkchat-backend'
+      - 'linkroom-backend'
       - '--image'
       - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
       - '--region'
-      - 'us-central1'
+      - 'asia-south1'
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
@@ -53,6 +57,12 @@ steps:
       # 3600s (the Cloud Run max) lets connections live an hour before a refresh.
       - '--timeout'
       - '3600'
+      # Each open WebSocket occupies one concurrency slot for its lifetime. At
+      # the default 80, ~400 connected users would spin up 5 instances, each
+      # billing active CPU. 250 lets one 512Mi instance hold several hundred
+      # mostly-idle sockets before scaling out.
+      - '--concurrency'
+      - '250'
       # Best-effort sticky sessions. Harmless with websocket-only, but protects
       # any polling handshake that still occurs (e.g. a dev client hitting prod).
       - '--session-affinity'

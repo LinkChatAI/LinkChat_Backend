@@ -96,15 +96,16 @@ export const adminVanishRoom = async (
   const redis = getRedisClient();
   if (redis && isRedisAvailable()) {
     try {
-      await redis.del(`room:${roomCode}:users`);
-      // Clean up user entries that reference this room
-      const keys = await redis.keys('user:*');
-      for (const key of keys) {
-        const userRoomCode = await redis.hget(key, 'roomCode');
+      // Use the room's member set as a reverse index instead of scanning
+      // the whole keyspace with KEYS (O(all users) and blocks Redis).
+      const userIds = await redis.smembers(`room:${roomCode}:users`);
+      for (const uid of userIds) {
+        const userRoomCode = await redis.hget(`user:${uid}`, 'roomCode');
         if (userRoomCode === roomCode) {
-          await redis.del(key);
+          await redis.del(`user:${uid}`);
         }
       }
+      await redis.del(`room:${roomCode}:users`);
       logger.debug(`Cleaned up Redis data for admin-vanished room ${roomCode}`);
     } catch (redisError: any) {
       logger.warn('Redis cleanup failed (non-critical)', {

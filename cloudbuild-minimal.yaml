@@ -27,11 +27,12 @@ steps:
     args:
       - 'run'
       - 'deploy'
-      - 'linkchat-backend'
+      # Live production service (the one Netlify proxies to)
+      - 'linkroom-backend'
       - '--image'
       - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'
       - '--region'
-      - 'us-central1'
+      - 'asia-south1'
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
@@ -45,6 +46,10 @@ steps:
       - '3600'
       - '--min-instances'
       - '1'
+      # WebSockets hold a concurrency slot each; 250 keeps hundreds of mostly
+      # idle sockets on one instance instead of scaling out at the default 80.
+      - '--concurrency'
+      - '250'
       - '--session-affinity'
       - '--set-env-vars'
       - 'PORT=8080,NODE_ENV=production'

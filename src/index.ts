@@ -22,6 +22,7 @@ import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import toolsRoutes from './routes/toolsRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { authenticateAdmin } from './middleware/adminAuth.js';
 import { startCleanupJob } from './services/cleanupService.js';
 import { logger } from './utils/logger.js';
 import { env } from './config/env.js';
@@ -70,7 +71,11 @@ const io = new Server(httpServer, {
     methods: ['GET', 'POST'],
     credentials: true,
   },
-  pingTimeout: 90000,
+  // Mobile browsers freeze background tabs, so client pings stop flowing.
+  // pingInterval 25s + pingTimeout 120s keeps the raw connection alive for
+  // ~2m25s of background time before the server drops it, and
+  // connectionStateRecovery below covers another 2 minutes beyond that.
+  pingTimeout: 120000,
   pingInterval: 25000,
   // Server accepts both transports. The production client uses websocket-only
   // (see frontend/src/services/socket.ts) to avoid the HTTP long-polling
@@ -175,8 +180,11 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const localUploadsDir = path.join(__dirname, '../uploads');
-app.use('/uploads', express.static(localUploadsDir));
-app.use('/api/uploads', express.static(localUploadsDir));
+// Uploaded file paths embed a fresh UUID per upload, so they're effectively immutable —
+// safe to cache aggressively client-side.
+const uploadsStaticOptions = { maxAge: '7d', immutable: true };
+app.use('/uploads', express.static(localUploadsDir, uploadsStaticOptions));
+app.use('/api/uploads', express.static(localUploadsDir, uploadsStaticOptions));
 
 // Request timeout middleware
 app.use((req, res, next) => {
@@ -223,8 +231,8 @@ app.get('/ready', async (req, res) => {
   }
 });
 
-// Database connection status endpoint (for debugging)
-app.get('/api/admin/db-status', async (req, res) => {
+// Database connection status endpoint (for debugging, admin-only)
+app.get('/api/admin/db-status', authenticateAdmin, async (req, res) => {
   try {
     const mongoose = await import('mongoose');
     const { env } = await import('./config/env.js');
@@ -250,8 +258,10 @@ app.get('/api/admin/db-status', async (req, res) => {
   }
 });
 
-// Manual database reconnection endpoint (for debugging)
-app.post('/api/admin/reconnect-db', async (req, res) => {
+// Manual database reconnection endpoint (for debugging, admin-only).
+// Unauthenticated, this let anyone force a disconnect/reconnect cycle
+// (5 retries with delays) — a trivial DoS against the connection pool.
+app.post('/api/admin/reconnect-db', authenticateAdmin, async (req, res) => {
   try {
     const { connectDatabase } = await import('./config/database.js');
     const mongoose = await import('mongoose');

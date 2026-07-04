@@ -1508,3 +1508,41 @@ export const vanishRoom = async (req: AdminRequest, res: Response): Promise<void
   }
 };
 
+/** GET /admin/rooms/:code — look up a single room by code (used by the Sponsor Banner Manager). */
+export const getRoomDetailByCode = async (req: AdminRequest, res: Response): Promise<void> => {
+  try {
+    const code = String(req.params.code || '').trim();
+    if (!code) {
+      res.status(400).json({ error: 'Room code is required' });
+      return;
+    }
+
+    const room = await RoomModel.findOne({ code })
+      .select('code name isLocked isEnded plan createdAt expiresAt')
+      .lean();
+
+    if (!room) {
+      res.status(404).json({ error: 'Room not found' });
+      return;
+    }
+
+    res.json({
+      room: {
+        code: room.code,
+        name: room.name || room.code,
+        isLocked: !!room.isLocked,
+        isEnded: !!room.isEnded,
+        plan: room.plan || 'free',
+        createdAt: room.createdAt,
+        expiresAt: room.expiresAt,
+      },
+    });
+  } catch (error: any) {
+    logger.error('Error fetching room detail', {
+      error: error instanceof Error ? error.message : String(error),
+      roomCode: req.params.code,
+    });
+    res.status(500).json({ error: 'Failed to fetch room detail' });
+  }
+};
+

@@ -954,13 +954,76 @@ const calculateInsights = async () => {
   }
 };
 
+// ── Admin presence & insights cache ──────────────────────────────────────────
+// emitAdminInsightUpdate fires on EVERY message/join/leave/file event, and
+// calculateInsights() runs ~15-20 MongoDB aggregations. Without gating, that
+// work happens even when no admin dashboard is open — by far the largest
+// avoidable database load in the app.
+
+// Cross-instance presence flag: the local adapter room only knows about admins
+// connected to THIS instance; an admin may be watching from another one.
+const ADMIN_PRESENCE_KEY = 'admin:presence';
+const ADMIN_PRESENCE_TTL_S = 90; // refreshed by the periodic updater; expires after crashes
+
+const refreshAdminPresence = async (): Promise<void> => {
+  const redis = getRedis();
+  if (redis && isRedisAvailable()) {
+    try {
+      await redis.setex(ADMIN_PRESENCE_KEY, ADMIN_PRESENCE_TTL_S, '1');
+    } catch { /* non-critical */ }
+  }
+};
+
+const clearAdminPresence = async (): Promise<void> => {
+  const redis = getRedis();
+  if (redis && isRedisAvailable()) {
+    try {
+      await redis.del(ADMIN_PRESENCE_KEY);
+    } catch { /* non-critical */ }
+  }
+};
+
+const isAnyAdminConnected = async (io: Server): Promise<boolean> => {
+  const localRoom = io.sockets.adapter.rooms.get(ADMIN_ROOM);
+  if (localRoom && localRoom.size > 0) return true;
+  // An O(1) Redis check per event is cheap next to the aggregations it guards.
+  const redis = getRedis();
+  if (redis && isRedisAvailable()) {
+    try {
+      return (await redis.exists(ADMIN_PRESENCE_KEY)) === 1;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+};
+
+// Short-TTL cache so event bursts while an admin is watching collapse into
+// one recalculation per window instead of one per message.
+let insightsCache: { data: Awaited<ReturnType<typeof calculateInsights>>; at: number } | null = null;
+const INSIGHTS_CACHE_TTL_MS = 10_000;
+
+const getInsightsCached = async (force = false) => {
+  if (!force && insightsCache && Date.now() - insightsCache.at < INSIGHTS_CACHE_TTL_MS) {
+    return insightsCache.data;
+  }
+  const data = await calculateInsights();
+  insightsCache = { data, at: Date.now() };
+  return data;
+};
+
 // Emit insight update to all admin clients
 export const emitAdminInsightUpdate = async (io: Server, event: string, data?: any): Promise<void> => {
   try {
+    // Nobody watching → skip the aggregations (and the HTTP-cache
+    // invalidation, which itself scans Redis). The REST dashboard cache has a
+    // 30s TTL, so it self-heals even without event-driven invalidation.
+    if (!(await isAnyAdminConnected(io))) return;
+
     // Invalidate cache when events occur
     await invalidateAdminCache('insights');
-    
-    const insights = await calculateInsights();
+
+    const insights = await getInsightsCached();
     io.to(ADMIN_ROOM).emit('admin:insight_update', {
       event,
       data,
@@ -968,9 +1031,9 @@ export const emitAdminInsightUpdate = async (io: Server, event: string, data?: a
       timestamp: new Date().toISOString()
     });
   } catch (error: any) {
-    logger.error('Error emitting admin insight update', { 
+    logger.error('Error emitting admin insight update', {
       error: error instanceof Error ? error.message : String(error),
-      event 
+      event
     });
   }
 };
@@ -989,9 +1052,12 @@ export const startPeriodicAdminUpdates = (io: Server): void => {
 
   periodicUpdateInterval = setInterval(async () => {
     try {
+      // Keep the cross-instance presence flag alive while admins are connected
+      await refreshAdminPresence();
+
       // Get real-time users online from Socket.IO
       const usersOnline = io ? (io.engine?.clientsCount || io.sockets.sockets.size || 0) : 0;
-      
+
       // Emit lightweight real-time update (only usersOnline, not full insights)
       io.to(ADMIN_ROOM).emit('admin:stats_update', {
         usersOnline,
@@ -1038,12 +1104,13 @@ export const handleAdminSocketConnection = (io: Server, socket: Socket): void =>
 
   // Start periodic updates if not already running
   startPeriodicAdminUpdates(io);
+  void refreshAdminPresence();
 
   // Join admin room
   socket.join(ADMIN_ROOM);
 
   // Send initial insights on connection (rehydration)
-  calculateInsights()
+  getInsightsCached()
     .then(insights => {
       socket.emit('admin:insights_snapshot', {
         insights,
@@ -1058,13 +1125,19 @@ export const handleAdminSocketConnection = (io: Server, socket: Socket): void =>
   // Handle admin disconnect
   socket.on('disconnect', () => {
     logger.info('Admin socket disconnected', { socketId: socket.id });
-    // Note: We don't stop periodic updates on disconnect, as other admins might be connected
+    // Stop the 7s interval when the last local admin leaves. Previously it
+    // ran for the life of the instance, emitting into an empty room forever.
+    const adminRoom = io.sockets.adapter.rooms.get(ADMIN_ROOM);
+    if (!adminRoom || adminRoom.size === 0) {
+      stopPeriodicAdminUpdates();
+      void clearAdminPresence();
+    }
   });
 
-  // Handle manual refresh request
+  // Handle manual refresh request — explicit refresh bypasses the cache
   socket.on('admin:refresh_insights', async () => {
     try {
-      const insights = await calculateInsights();
+      const insights = await getInsightsCached(true);
       socket.emit('admin:insights_snapshot', {
         insights,
         timestamp: new Date().toISOString()

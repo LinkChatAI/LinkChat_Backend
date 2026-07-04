@@ -8,6 +8,14 @@ export interface IUserVisit {
   leftAt?: Date;
   sessionDuration?: number; // milliseconds
   messagesSent?: number; // Number of messages sent during this visit
+  /** Public IP the visit was joined from — used only to resolve approximate location below. */
+  ipAddress?: string;
+  /** Approximate, city-level location resolved from ipAddress. Never derived from browser GPS. */
+  city?: string;
+  region?: string;
+  country?: string;
+  lat?: number;
+  lon?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -21,6 +29,12 @@ const UserVisitSchema = new Schema<IUserVisit>(
     leftAt: { type: Date },
     sessionDuration: { type: Number }, // milliseconds
     messagesSent: { type: Number, default: 0 },
+    ipAddress: { type: String },
+    city: { type: String },
+    region: { type: String },
+    country: { type: String, index: true },
+    lat: { type: Number },
+    lon: { type: Number },
   },
   { timestamps: true }
 );
@@ -29,5 +43,6 @@ const UserVisitSchema = new Schema<IUserVisit>(
 UserVisitSchema.index({ userId: 1, joinedAt: -1 });
 UserVisitSchema.index({ roomCode: 1, joinedAt: -1 });
 UserVisitSchema.index({ joinedAt: -1 });
+UserVisitSchema.index({ country: 1, region: 1, city: 1 });
 
 export const UserVisitModel = mongoose.model<IUserVisit>('UserVisit', UserVisitSchema);

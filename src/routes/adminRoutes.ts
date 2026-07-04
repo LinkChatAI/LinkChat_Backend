@@ -14,8 +14,15 @@ import {
   getLockedRoomsList,
   vanishRoom,
   getDebugStats,
+  getRoomDetailByCode,
 } from '../controllers/adminController.js';
 import { getContactSubmissions } from '../controllers/contactController.js';
+import {
+  getRoomBanner,
+  upsertRoomBanner,
+  deleteRoomBanner,
+} from '../controllers/sponsorBannerController.js';
+import { getUserLocations } from '../controllers/userLocationController.js';
 import { authenticateAdmin } from '../middleware/adminAuth.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
 import { auditAdminAction } from '../middleware/adminAudit.js';
@@ -144,12 +151,52 @@ router.post(
   vanishRoom
 );
 
+// Single room lookup by code (used by the Sponsor Banner Manager) — registered after the
+// literal /rooms/active and /rooms/locked routes above so it doesn't shadow them.
+router.get(
+  '/rooms/:code',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_room_detail', { code: ':code' }),
+  getRoomDetailByCode
+);
+
 // Contact submissions endpoint (admin-only)
 router.get(
   '/contact/submissions',
   rateLimiter('adminInsight'),
   auditAdminAction('get_contact_submissions'),
   getContactSubmissions
+);
+
+// User geolocation (approximate, IP-derived) for the admin map view
+router.get(
+  '/user-locations',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_user_locations'),
+  cacheAdminResponse({ ttl: 60 }),
+  getUserLocations
+);
+
+// Sponsor / event banner management — one banner per room, keyed by room code
+router.get(
+  '/sponsors/:roomCode',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_room_banner', { roomCode: ':roomCode' }),
+  getRoomBanner
+);
+
+router.put(
+  '/sponsors/:roomCode',
+  rateLimiter('adminAction'),
+  auditAdminAction('upsert_room_banner', { roomCode: ':roomCode' }),
+  upsertRoomBanner
+);
+
+router.delete(
+  '/sponsors/:roomCode',
+  rateLimiter('adminAction'),
+  auditAdminAction('delete_room_banner', { roomCode: ':roomCode' }),
+  deleteRoomBanner
 );
 
 // Lightweight connectivity check for admin login
