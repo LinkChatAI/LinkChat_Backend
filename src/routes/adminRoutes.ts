@@ -18,9 +18,13 @@ import {
 } from '../controllers/adminController.js';
 import { getContactSubmissions } from '../controllers/contactController.js';
 import {
-  getRoomBanner,
-  upsertRoomBanner,
-  deleteRoomBanner,
+  listBanners,
+  createBanner,
+  updateBanner,
+  deleteBanner,
+  listRoomBannerMappings,
+  assignRoomBanner,
+  unassignRoomBanner,
 } from '../controllers/sponsorBannerController.js';
 import { getUserLocations } from '../controllers/userLocationController.js';
 import { authenticateAdmin } from '../middleware/adminAuth.js';
@@ -177,26 +181,55 @@ router.get(
   getUserLocations
 );
 
-// Sponsor / event banner management — one banner per room, keyed by room code
+// Sponsor / event banner library — reusable assets, each assignable to many rooms
 router.get(
-  '/sponsors/:roomCode',
+  '/banners',
   rateLimiter('adminInsight'),
-  auditAdminAction('get_room_banner', { roomCode: ':roomCode' }),
-  getRoomBanner
+  auditAdminAction('list_banners'),
+  listBanners
+);
+
+router.post(
+  '/banners',
+  rateLimiter('adminAction'),
+  auditAdminAction('create_banner'),
+  createBanner
 );
 
 router.put(
-  '/sponsors/:roomCode',
+  '/banners/:id',
   rateLimiter('adminAction'),
-  auditAdminAction('upsert_room_banner', { roomCode: ':roomCode' }),
-  upsertRoomBanner
+  auditAdminAction('update_banner', { id: ':id' }),
+  updateBanner
 );
 
 router.delete(
-  '/sponsors/:roomCode',
+  '/banners/:id',
   rateLimiter('adminAction'),
-  auditAdminAction('delete_room_banner', { roomCode: ':roomCode' }),
-  deleteRoomBanner
+  auditAdminAction('delete_banner', { id: ':id' }),
+  deleteBanner
+);
+
+// Room <-> banner assignments — the single place to see/manage every room's banner
+router.get(
+  '/room-banners',
+  rateLimiter('adminInsight'),
+  auditAdminAction('list_room_banner_mappings'),
+  listRoomBannerMappings
+);
+
+router.put(
+  '/room-banners/:roomCode',
+  rateLimiter('adminAction'),
+  auditAdminAction('assign_room_banner', { roomCode: ':roomCode' }),
+  assignRoomBanner
+);
+
+router.delete(
+  '/room-banners/:roomCode',
+  rateLimiter('adminAction'),
+  auditAdminAction('unassign_room_banner', { roomCode: ':roomCode' }),
+  unassignRoomBanner
 );
 
 // Lightweight connectivity check for admin login

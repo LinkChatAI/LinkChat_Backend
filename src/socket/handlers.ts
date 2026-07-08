@@ -12,6 +12,7 @@ import { registerScreenShareHandlers } from './handlers/screenShareHandlers.js';
 import { registerModerationHandlers } from './handlers/moderationHandlers.js';
 import { registerRoomAdminHandlers } from './handlers/roomAdminHandlers.js';
 import { recordReconnect } from '../services/platformMetricsService.js';
+import { trackSocketConnected, trackSocketDisconnected } from '../services/metricsService.js';
 
 // Re-export for backward compatibility (adminRoomService imports this)
 export { clearPendingDeletionTimer } from './handlers/roomLifecycleHandlers.js';
@@ -20,6 +21,9 @@ export const handleSocketConnection = (io: Server, socket: Socket): void => {
   if ((socket as any).recovered) {
     recordReconnect();
   }
+
+  trackSocketConnected();
+  socket.on('disconnect', () => trackSocketDisconnected());
 
   const authUserId = socket.handshake.auth?.userId;
   const user: SocketUser = {

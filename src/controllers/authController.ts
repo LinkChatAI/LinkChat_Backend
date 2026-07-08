@@ -115,6 +115,8 @@ export const getMeHandler = async (req: UserAuthRequest, res: Response): Promise
     avatar: user.avatar,
     plan: user.plan,
     linkedGuestId: user.linkedGuestId,
+    role: user.role,
+    credits: user.credits,
   });
 };
 

@@ -12,6 +12,8 @@ import { clearScreenShareState } from '../screenShareState.js';
 import { clearRoomModeration } from '../../services/roomModerationService.js';
 import { clearSlowModeForRoom } from '../../services/slowModeService.js';
 import { clearRoomReceipts } from '../../services/readReceiptService.js';
+import { getCachedRoomSockets } from './socketCache.js';
+import { setRoomParticipantCount } from '../../services/metricsService.js';
 
 const clearAllRoomState = (roomCode: string): void => {
   clearScreenShareState(roomCode);
@@ -151,6 +153,13 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         try {
           await redis.srem(`room:${roomCodeToLeave}:users`, userId);
           await redis.del(`user:${userId}`);
+          // Free up the nickname slot so it doesn't sit reserved for the rest of
+          // the room's 6h TTL — otherwise long-running, high-churn rooms
+          // accumulate stale reservations and push future joins into the
+          // suffix-retry loop for no reason.
+          if (user.nickname) {
+            await redis.srem(`room:${roomCodeToLeave}:nicknames`, user.nickname.toLowerCase());
+          }
         } catch (error: any) {
           logger.warn('Redis cleanup error during leave room', {
             error: error instanceof Error ? error.message : String(error),
@@ -167,12 +176,15 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         try {
           userCount = await redis.scard(`room:${roomCodeToLeave}:users`);
         } catch (error: any) {
-          userCount = io.sockets.adapter.rooms.get(roomCodeToLeave)?.size || 0;
+          // Redis errored mid-call — fetchSockets() is accurate across instances
+          // (unlike io.sockets.adapter.rooms, which only reflects this instance).
+          userCount = (await getCachedRoomSockets(io, roomCodeToLeave)).length;
         }
       } else {
-        userCount = io.sockets.adapter.rooms.get(roomCodeToLeave)?.size || 0;
+        userCount = (await getCachedRoomSockets(io, roomCodeToLeave)).length;
       }
       io.to(roomCodeToLeave).emit('userCount', { count: userCount });
+      setRoomParticipantCount(roomCodeToLeave, userCount);
 
       if (shouldEmitRoomLeft) {
         socket.emit('roomLeft', { roomId: roomCodeToLeave });

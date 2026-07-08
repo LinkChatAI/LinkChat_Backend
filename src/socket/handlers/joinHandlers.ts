@@ -13,6 +13,9 @@ import { getScreenSharePublicState } from '../screenShareState.js';
 import { recordFailedJoin } from '../../services/platformMetricsService.js';
 import { isUserKicked } from '../../services/roomModerationService.js';
 import { getStorageLimitForPlan } from '../../constants/roomStorage.js';
+import type { RoomBannerPayload } from '../../services/roomBannerBroadcast.js';
+import { getCachedRoomSockets } from './socketCache.js';
+import { setRoomParticipantCount } from '../../services/metricsService.js';
 
 const getRedis = () => getRedisClient();
 
@@ -24,7 +27,7 @@ const getOnlineParticipantSnapshots = async (
   const seen = new Set<string>();
 
   try {
-    const sockets = await io.in(roomCode).fetchSockets();
+    const sockets = await getCachedRoomSockets(io, roomCode);
     for (const s of sockets) {
       const su = (s as { data?: { user?: SocketUser } }).data?.user;
       if (!su?.userId || seen.has(su.userId)) continue;
@@ -54,12 +57,17 @@ const waitForDatabase = async (maxRetries = 10, delayMs = 1000): Promise<boolean
   return false;
 };
 
-const ensureNicknameUniqueInRoom = async (
-  baseNickname: string,
+/**
+ * Expensive, multi-source reconstruction of nicknames already in use in a room
+ * (live sockets + message history). Only needed when Redis is unavailable —
+ * when Redis is up, the atomic `room:{code}:nicknames` SADD in `tryReserve`
+ * below is the real source of truth and this whole scan can be skipped.
+ */
+const buildExistingNicknamesFallback = async (
   roomCode: string,
   excludeUserId: string,
   io: Server,
-): Promise<string> => {
+): Promise<Set<string>> => {
   const existingNicknames = new Set<string>();
 
   try {
@@ -79,27 +87,6 @@ const ensureNicknameUniqueInRoom = async (
     });
   }
 
-  const redis = getRedis();
-  if (redis && isRedisAvailable()) {
-    try {
-      const userIds = await redis.smembers(`room:${roomCode}:users`);
-      if (userIds && userIds.length > 0) {
-        for (const userId of userIds) {
-          if (userId !== excludeUserId) {
-            const storedNickname = await redis.hget(`user:${userId}`, 'nickname');
-            if (storedNickname && storedNickname !== 'Anonymous') {
-              existingNicknames.add(storedNickname.toLowerCase());
-            }
-          }
-        }
-      }
-    } catch (error: any) {
-      logger.warn('Failed to check Redis for nicknames', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
   try {
     const { MessageModel } = await import('../../models/Message.js');
     const query: any = { roomCode };
@@ -115,6 +102,27 @@ const ensureNicknameUniqueInRoom = async (
       error: error instanceof Error ? error.message : String(error),
     });
   }
+
+  return existingNicknames;
+};
+
+const ensureNicknameUniqueInRoom = async (
+  baseNickname: string,
+  roomCode: string,
+  excludeUserId: string,
+  io: Server,
+): Promise<string> => {
+  const redis = getRedis();
+  const redisReady = !!redis && isRedisAvailable();
+
+  // When Redis is up, skip the fetchSockets()/Redis-hget-loop/Mongo-distinct
+  // reconstruction entirely — `tryReserve` below atomically SADDs into
+  // `room:{code}:nicknames`, which is already the authoritative record of every
+  // nickname reserved in this room, so a collision surfaces for free via SADD's
+  // return value instead of needing a per-join O(N) pre-check.
+  const existingNicknames = redisReady
+    ? new Set<string>()
+    : await buildExistingNicknamesFallback(roomCode, excludeUserId, io);
 
   const baseLower = baseNickname.toLowerCase();
 
@@ -332,15 +340,10 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       const participants = await getOnlineParticipantSnapshots(io, code);
 
       // Best-effort — a banner lookup failure should never block a room join.
-      let banner: { imageUrl: string; title?: string } | null = null;
+      let banner: RoomBannerPayload | null = null;
       try {
-        const { SponsorBannerModel } = await import('../../models/SponsorBanner.js');
-        const bannerDoc = await SponsorBannerModel.findOne({ roomCode: code })
-          .select('imageUrl title')
-          .lean();
-        if (bannerDoc) {
-          banner = { imageUrl: bannerDoc.imageUrl, title: bannerDoc.title };
-        }
+        const { resolveRoomBanner } = await import('../../services/roomBannerBroadcast.js');
+        banner = await resolveRoomBanner(code);
       } catch (bannerError: unknown) {
         logger.warn('Failed to load room banner on join', {
           error: bannerError instanceof Error ? bannerError.message : String(bannerError),
@@ -372,12 +375,15 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         try {
           userCount = await redis.scard(`room:${code}:users`);
         } catch (error: any) {
-          userCount = io.sockets.adapter.rooms.get(code)?.size || 0;
+          // Redis errored mid-call — fetchSockets() is accurate across instances
+          // (unlike io.sockets.adapter.rooms, which only reflects this instance).
+          userCount = (await getCachedRoomSockets(io, code)).length;
         }
       } else {
-        userCount = io.sockets.adapter.rooms.get(code)?.size || 0;
+        userCount = (await getCachedRoomSockets(io, code)).length;
       }
       io.to(code).emit('userCount', { count: userCount });
+      setRoomParticipantCount(code, userCount);
       logger.info(`User ${user.userId} joined room ${code}`);
 
       try {

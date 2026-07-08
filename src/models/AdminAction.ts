@@ -1,7 +1,8 @@
 import mongoose, { Schema } from 'mongoose';
 
 export interface AdminAction {
-  adminId: string; // Admin identifier (from secret hash or session)
+  adminId: string; // Admin identifier (from secret hash, or a real User._id for per-user RBAC actions)
+  adminEmail?: string; // Populated for per-user RBAC actions (requireAdminRole), absent for shared-secret actions
   action: string;
   endpoint: string;
   method: string;
@@ -18,6 +19,7 @@ export interface AdminAction {
 const AdminActionSchema = new Schema<AdminAction>(
   {
     adminId: { type: String, required: true, index: true },
+    adminEmail: { type: String },
     action: { type: String, required: true, index: true },
     endpoint: { type: String, required: true, index: true },
     method: { type: String, required: true },

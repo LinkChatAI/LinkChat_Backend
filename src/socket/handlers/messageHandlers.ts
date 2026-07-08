@@ -23,6 +23,7 @@ import { HandlerContext, normalizeMessageType, normalizeMessages, stripHeavyCont
 import { isUserMuted } from '../../services/roomModerationService.js';
 import { canModerateRoom } from '../../services/roomPermissionService.js';
 import { checkSlowMode } from '../../services/slowModeService.js';
+import { recordMessageSent, observeBroadcastLatencyMs } from '../../services/metricsService.js';
 
 export const registerMessageHandlers = (ctx: HandlerContext): void => {
   const { io, socket, user, ensureUserInRoom, emitErrorAlert, typingUsers } = ctx;
@@ -72,6 +73,7 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
     },
     ack?: (response: { success: boolean; messageId?: string; error?: string }) => void,
   ) => {
+    const receivedAt = Date.now();
     try {
       if (!ensureUserInRoom()) {
         const errorMsg = 'Not in a room. Please join a room first.';
@@ -258,7 +260,8 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
             mimeType: data.fileMeta.mimeType,
           },
           data.replyTo,
-          avatar
+          avatar,
+          room?.expiresAt,
         );
 
         if (data.type === 'image' || (data.fileMeta.mimeType && data.fileMeta.mimeType.startsWith('image/'))) {
@@ -299,12 +302,14 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
         }
         message = await createMessage(
           user.roomCode, user.userId, user.nickname, content, 'text',
-          undefined, data.replyTo, avatar
+          undefined, data.replyTo, avatar, room?.expiresAt,
         );
         if (data.tempId) (message as any).tempId = data.tempId;
       }
 
       io.to(user.roomCode).emit('newMessage', message);
+      recordMessageSent();
+      observeBroadcastLatencyMs(Date.now() - receivedAt);
       logger.debug(`Message sent in room ${user.roomCode} by user ${user.userId}`, {
         messageId: message.id,
         hasFile: data.type === 'file' || data.type === 'image' || content.includes('[File:'),
@@ -700,6 +705,54 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
     } catch (error: any) {
       // Intentionally non-throwing — read receipts must never crash the message pipeline
       logger.error('markMessageSeen: error', {
+        error: error instanceof Error ? error.message : String(error),
+        socketId: socket.id,
+      });
+    }
+  });
+
+  // Batched sibling of markMessageSeen — the frontend sends up to 50 ids at
+  // once (see useReadReceipts.ts) so a reader catching up on history does one
+  // DB update + one room broadcast instead of one of each per message.
+  socket.on('markMessagesSeen', async (data: { messageIds: string[] }) => {
+    try {
+      if (!user.roomCode) {
+        logger.debug('markMessagesSeen: user not in a room', { socketId: socket.id });
+        return;
+      }
+
+      if (!data || !Array.isArray(data.messageIds) || data.messageIds.length === 0) {
+        logger.debug('markMessagesSeen: invalid messageIds', { socketId: socket.id });
+        return;
+      }
+
+      const messageIds = data.messageIds
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        .map((id) => id.trim())
+        .slice(0, 50);
+
+      if (messageIds.length === 0) return;
+
+      const userId = socket.handshake.auth?.userId || user.userId;
+
+      // Atomically add the userId to seenBy for every matched message in one round trip.
+      const result = await MessageModel.updateMany(
+        { id: { $in: messageIds }, roomCode: user.roomCode },
+        { $addToSet: { seenBy: userId } }
+      );
+
+      if (result.matchedCount === 0) {
+        logger.debug('markMessagesSeen: no matching messages', { roomCode: user.roomCode });
+        return;
+      }
+
+      // One broadcast for the whole batch instead of one per message.
+      io.to(user.roomCode).emit('messagesSeen', { messageIds, userId });
+
+      logger.debug('markMessagesSeen: marked', { count: messageIds.length, userId, roomCode: user.roomCode });
+    } catch (error: any) {
+      // Intentionally non-throwing — read receipts must never crash the message pipeline
+      logger.error('markMessagesSeen: error', {
         error: error instanceof Error ? error.message : String(error),
         socketId: socket.id,
       });

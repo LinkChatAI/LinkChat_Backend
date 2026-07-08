@@ -51,8 +51,8 @@ export const connectDatabase = async (retries = 0): Promise<void> => {
     const connectionOptions: mongoose.ConnectOptions = {
       serverSelectionTimeoutMS: 30000, // Increased timeout for Atlas
       socketTimeoutMS: 45000,
-      maxPoolSize: 10,
-      minPoolSize: 2,
+      maxPoolSize: env.MONGO_MAX_POOL_SIZE,
+      minPoolSize: env.MONGO_MIN_POOL_SIZE,
       retryWrites: true,
       w: 'majority',
       // Don't set authSource - let MongoDB use the default from connection string

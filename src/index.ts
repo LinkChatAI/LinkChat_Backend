@@ -21,6 +21,11 @@ import linkPreviewRoutes from './routes/linkPreviewRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import toolsRoutes from './routes/toolsRoutes.js';
+import planRoutes from './routes/planRoutes.js';
+import subscriptionRoutes from './routes/subscriptionRoutes.js';
+import creditRoutes from './routes/creditRoutes.js';
+import adminBillingRoutes from './routes/adminBillingRoutes.js';
+import adminUserRoutes from './routes/adminUserRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { authenticateAdmin } from './middleware/adminAuth.js';
 import { startCleanupJob } from './services/cleanupService.js';
@@ -84,6 +89,11 @@ const io = new Server(httpServer, {
   // polling as a fallback against a single backend instance.
   transports: ['websocket', 'polling'],
   maxHttpBufferSize: 15 * 1024 * 1024, // 15MB to accommodate 10MB files after base64 encoding (~33% overhead)
+  // Per-message compression costs CPU per frame; under a large room's broadcast
+  // fan-out (one 'newMessage' frame re-serialized/sent to every socket) that
+  // adds up fast. Payloads here are small JSON, so compression rarely pays for
+  // itself — trade a little bandwidth for meaningfully less CPU under load.
+  perMessageDeflate: false,
   // Restore session state (rooms + missed packets) after a brief disconnect
   // instead of forcing a full rejoin. Smooths over mobile tab freezes and
   // momentary network blips. Works across instances via the Redis adapter.
@@ -194,6 +204,19 @@ app.use((req, res, next) => {
   next();
 });
 
+// Prometheus scrape endpoint — same auth as /api/admin/*. A scrape config can
+// use `authorization: { type: Bearer, credentials: <ADMIN_SECRET> }` since
+// authenticateAdmin also accepts a Bearer token.
+app.get('/metrics', authenticateAdmin, async (req, res) => {
+  try {
+    const { getMetricsText, getMetricsContentType } = await import('./services/metricsService.js');
+    res.set('Content-Type', getMetricsContentType());
+    res.end(await getMetricsText());
+  } catch (error: any) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to collect metrics' });
+  }
+});
+
 // Health check endpoint
 app.get('/healthz', (req, res) => {
   res.json({ 
@@ -214,12 +237,16 @@ app.get('/ready', async (req, res) => {
       database: mongoose.default.connection.readyState === 1,
       redis: redis.isRedisAvailable(),
     };
-    
+
     const allHealthy = Object.values(checks).every(v => v);
-    
+
     res.status(allHealthy ? 200 : 503).json({
       status: allHealthy ? 'ready' : 'not ready',
       checks,
+      // Whether THIS instance can broadcast across other Cloud Run instances —
+      // 'memory' here in production means this instance is isolated even if
+      // `checks.redis` is true (e.g. app Redis client up, adapter still retrying).
+      socketIoAdapter: getSocketIoAdapterStatus(),
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
@@ -304,6 +331,14 @@ app.use('/api/rooms', roomRoutes);
 app.use('/api/nickname', nicknameRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/admin', adminRoutes);
+// Mounted OUTSIDE '/api/admin' — that prefix is fully claimed by the legacy shared-secret
+// adminRoutes router above (its router.use(authenticateAdmin) intercepts every sub-path
+// unconditionally), so nesting these under /api/admin/* would make them unreachable.
+app.use('/api/billing-admin', adminBillingRoutes);
+app.use('/api/rbac-users', adminUserRoutes);
+app.use('/api/plans', planRoutes);
+app.use('/api/subscriptions', subscriptionRoutes);
+app.use('/api/credits', creditRoutes);
 app.use('/api/files', fileRoutes);
 
 // Link preview (OG cards) with rate limit
@@ -341,27 +376,22 @@ io.on('connection', async (socket) => {
 
 let cleanupJobInterval: NodeJS.Timeout | null = null;
 let autoVanishInterval: NodeJS.Timeout | null = null;
+let subscriptionExpiryInterval: NodeJS.Timeout | null = null;
+let metricsLogInterval: NodeJS.Timeout | null = null;
 let adapterPubClient: any = null;
 let adapterSubClient: any = null;
 
-// Wire the Socket.IO Redis adapter so broadcasts (newMessage, etc.) reach
-// clients connected to OTHER Cloud Run instances. Without this, a message sent
-// on instance A is never delivered to a user on instance B. Falls back silently
-// to the in-memory adapter (single-instance) when Redis is unavailable.
-const setupRedisAdapter = async (): Promise<void> => {
-  // The Redis adapter only matters when running multiple instances (production
-  // on Cloud Run). Local dev is a single instance, so skip it entirely and
-  // avoid the startup connection attempt / log noise. Set REDIS_ADAPTER=1 to
-  // force it on in development (e.g. to test multi-instance locally).
-  const wantAdapter = process.env.NODE_ENV === 'production' || process.env.REDIS_ADAPTER === '1';
-  if (!wantAdapter) {
-    logger.info('Socket.IO using in-memory adapter (development, single instance)');
-    return;
-  }
-  if (!env.REDIS_URL) {
-    logger.warn('REDIS_URL not set — Socket.IO using in-memory adapter (safe only for a single instance)');
-    return;
-  }
+// Exposed on /ready so it's visible whether THIS instance can actually
+// broadcast across other Cloud Run instances, not just whether the app's own
+// Redis client (config/redis.ts) is up.
+export type SocketIoAdapterStatus = 'redis' | 'memory';
+let socketIoAdapterStatus: SocketIoAdapterStatus = 'memory';
+export const getSocketIoAdapterStatus = (): SocketIoAdapterStatus => socketIoAdapterStatus;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** One connect-and-wire attempt. Returns true if the Redis adapter is now active. */
+const tryConnectRedisAdapter = async (): Promise<boolean> => {
   try {
     const { createAdapter } = await import('@socket.io/redis-adapter');
     const { default: Redis } = await import('ioredis');
@@ -396,19 +426,49 @@ const setupRedisAdapter = async (): Promise<void> => {
     await Promise.all([adapterPubClient.connect(), adapterSubClient.connect()]);
 
     io.adapter(createAdapter(adapterPubClient, adapterSubClient));
+    socketIoAdapterStatus = 'redis';
     logger.info('Socket.IO Redis adapter enabled (cross-instance broadcasting active)');
+    return true;
   } catch (error: any) {
-    // Redis unreachable — tear down the clients so they stop retrying, and run
-    // with the in-memory adapter. Fine for a single instance (local dev);
-    // multi-instance production must provide a reachable REDIS_URL.
-    logger.warn('Redis unreachable — Socket.IO using in-memory adapter (safe only for a single instance)', {
+    logger.warn('Redis adapter connect attempt failed', {
       error: error instanceof Error ? error.message : String(error),
     });
     try { if (adapterPubClient) adapterPubClient.disconnect(); } catch { /* ignore */ }
     try { if (adapterSubClient) adapterSubClient.disconnect(); } catch { /* ignore */ }
     adapterPubClient = null;
     adapterSubClient = null;
+    return false;
   }
+};
+
+// Wire the Socket.IO Redis adapter so broadcasts (newMessage, etc.) reach
+// clients connected to OTHER Cloud Run instances. Without this, a message sent
+// on instance A is never delivered to a user on instance B. Retries a few
+// times with backoff — a transient Redis cold-start blip at boot shouldn't
+// permanently strand an instance on the in-memory adapter for its whole
+// lifetime — then falls back to in-memory (safe only for a single instance).
+const setupRedisAdapter = async (): Promise<void> => {
+  // The Redis adapter only matters when running multiple instances (production
+  // on Cloud Run). Local dev is a single instance, so skip it entirely and
+  // avoid the startup connection attempt / log noise. Set REDIS_ADAPTER=1 to
+  // force it on in development (e.g. to test multi-instance locally).
+  const wantAdapter = process.env.NODE_ENV === 'production' || process.env.REDIS_ADAPTER === '1';
+  if (!wantAdapter) {
+    logger.info('Socket.IO using in-memory adapter (development, single instance)');
+    return;
+  }
+  if (!env.REDIS_URL) {
+    logger.warn('REDIS_URL not set — Socket.IO using in-memory adapter (safe only for a single instance)');
+    return;
+  }
+
+  const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (await tryConnectRedisAdapter()) return;
+    if (attempt < RETRY_DELAYS_MS.length) await sleep(RETRY_DELAYS_MS[attempt]);
+  }
+
+  logger.warn('Redis unreachable after retries — Socket.IO using in-memory adapter (safe only for a single instance)');
 };
 
 const startServer = () => {
@@ -472,10 +532,37 @@ const startServer = () => {
       autoVanishInterval = startAutoVanishWorker();
       logger.info('Auto-vanish worker started');
     } catch (error: any) {
-      logger.error('Failed to start auto-vanish worker', { 
-        error: error instanceof Error ? error.message : String(error) 
+      logger.error('Failed to start auto-vanish worker', {
+        error: error instanceof Error ? error.message : String(error)
       });
       // Don't exit - server can still run
+    }
+  })();
+
+  // Start subscription-expiry worker (non-blocking)
+  (async () => {
+    try {
+      const { startSubscriptionExpiryWorker } = await import('./services/subscriptionExpiryService.js');
+      subscriptionExpiryInterval = startSubscriptionExpiryWorker();
+      logger.info('Subscription expiry worker started');
+    } catch (error: any) {
+      logger.error('Failed to start subscription expiry worker', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Don't exit - server can still run
+    }
+  })();
+
+  // Periodic metrics summary in Cloud Logging, independent of whether a
+  // Prometheus scraper is configured against /metrics.
+  (async () => {
+    try {
+      const { startMetricsLogging } = await import('./services/metricsService.js');
+      metricsLogInterval = startMetricsLogging();
+    } catch (error: any) {
+      logger.error('Failed to start metrics logging', {
+        error: error instanceof Error ? error.message : String(error)
+      });
     }
   })();
 };
@@ -498,6 +585,14 @@ const shutdown = async (signal: string) => {
 
   if (autoVanishInterval) {
     clearInterval(autoVanishInterval);
+  }
+
+  if (subscriptionExpiryInterval) {
+    clearInterval(subscriptionExpiryInterval);
+  }
+
+  if (metricsLogInterval) {
+    clearInterval(metricsLogInterval);
   }
 
   try {

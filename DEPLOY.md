@@ -77,8 +77,8 @@ gcloud builds submit --config backend/cloudbuild-simple.yaml
 Then set environment variables:
 
 ```bash
-gcloud run services update linkchat-backend \
-  --region us-central1 \
+gcloud run services update linkroom-backend \
+  --region asia-south1 \
   --update-env-vars "MONGO_URI=your-mongo-uri,REDIS_URL=your-redis-url,JWT_SECRET=your-secret,FRONTEND_URL=https://your-app.netlify.app"
 ```
 
@@ -87,8 +87,8 @@ gcloud run services update linkchat-backend \
 After successful deployment:
 
 ```bash
-gcloud run services describe linkchat-backend \
-  --region us-central1 \
+gcloud run services describe linkroom-backend \
+  --region asia-south1 \
   --format="value(status.url)"
 ```
 
@@ -118,7 +118,7 @@ gcloud builds log BUILD_ID
 
 Check Cloud Run logs:
 ```bash
-gcloud run services logs read linkchat-backend --region us-central1
+gcloud run services logs read linkroom-backend --region asia-south1
 ```
 
 ### Health Check Fails
@@ -135,23 +135,25 @@ If Cloud Build doesn't work, build and push manually:
 cd backend
 
 # Build
-docker build -t gcr.io/YOUR_PROJECT_ID/linkchat-backend:latest .
+docker build -t gcr.io/YOUR_PROJECT_ID/linkroom-backend:latest .
 
 # Push
-docker push gcr.io/YOUR_PROJECT_ID/linkchat-backend:latest
+docker push gcr.io/YOUR_PROJECT_ID/linkroom-backend:latest
 
 # Deploy
-gcloud run deploy linkchat-backend \
-  --image gcr.io/YOUR_PROJECT_ID/linkchat-backend:latest \
-  --region us-central1 \
+gcloud run deploy linkroom-backend \
+  --image gcr.io/YOUR_PROJECT_ID/linkroom-backend:latest \
+  --region asia-south1 \
   --platform managed \
   --allow-unauthenticated \
   --port 8080 \
   --memory 512Mi \
   --cpu 1 \
-  --min-instances 0 \
+  --min-instances 1 \
   --max-instances 10 \
-  --timeout 300 \
+  --timeout 3600 \
+  --concurrency 250 \
+  --session-affinity \
   --startup-cpu-boost \
   --set-env-vars "PORT=8080,NODE_ENV=production"
 ```

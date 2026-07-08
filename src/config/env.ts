@@ -49,6 +49,10 @@ interface EnvConfig {
   GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_OAUTH_REDIRECT_URI?: string;
   USER_JWT_SECRET?: string;
+  MONGO_MAX_POOL_SIZE: number;
+  MONGO_MIN_POOL_SIZE: number;
+  /** Comma-separated emails always treated as admin (RBAC bootstrap — auto-promoted on first check). */
+  PERMANENT_ADMIN_EMAILS?: string;
 }
 
 const requiredEnvVars = [
@@ -109,6 +113,12 @@ const validateEnv = (): EnvConfig => {
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
     GOOGLE_OAUTH_REDIRECT_URI: process.env.GOOGLE_OAUTH_REDIRECT_URI,
     USER_JWT_SECRET: process.env.USER_JWT_SECRET || process.env.JWT_SECRET,
+    // Defaults raised from the driver defaults (10/2) so a burst of concurrent
+    // message/join queries during a participant spike doesn't queue behind a
+    // small connection pool.
+    MONGO_MAX_POOL_SIZE: parseInt(process.env.MONGO_MAX_POOL_SIZE || '50', 10),
+    MONGO_MIN_POOL_SIZE: parseInt(process.env.MONGO_MIN_POOL_SIZE || '5', 10),
+    PERMANENT_ADMIN_EMAILS: process.env.PERMANENT_ADMIN_EMAILS,
   };
 };
 

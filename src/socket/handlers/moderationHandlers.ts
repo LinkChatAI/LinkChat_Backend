@@ -10,6 +10,7 @@ import { canModerateRoom } from '../../services/roomPermissionService.js';
 import { SocketUser } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
 import { HandlerContext } from './types.js';
+import { getCachedRoomSockets } from './socketCache.js';
 
 export const registerModerationHandlers = (ctx: HandlerContext): void => {
   const { io, socket, user, ensureUserInRoom, emitErrorAlert } = ctx;
@@ -22,7 +23,7 @@ export const registerModerationHandlers = (ctx: HandlerContext): void => {
 
     try {
       const room = await getRoomByCode(user.roomCode);
-      const sockets = await io.in(user.roomCode).fetchSockets();
+      const sockets = await getCachedRoomSockets(io, user.roomCode);
       const seen = new Set<string>();
       const participants: Array<{
         userId: string;
@@ -62,7 +63,7 @@ export const registerModerationHandlers = (ctx: HandlerContext): void => {
     }
 
     try {
-      const sockets = await io.in(user.roomCode).fetchSockets();
+      const sockets = await getCachedRoomSockets(io, user.roomCode);
       const seen = new Set<string>();
       const participants: Array<{
         userId: string;

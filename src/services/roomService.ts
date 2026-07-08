@@ -8,6 +8,25 @@ import { logger } from '../utils/logger.js';
 import { env } from '../config/env.js';
 
 /**
+ * `getRoomByCode` is called on every message send and every join — a burst of
+ * either hits Mongo once per call with no caching. Room settings (lock state,
+ * slow mode, ownership) change rarely, so a short-TTL cache cuts nearly all of
+ * that read traffic. Every mutator below invalidates its room's entry
+ * immediately; the TTL is just a safety net for any update path that doesn't
+ * go through this file.
+ */
+const ROOM_CACHE_TTL_MS = 4000;
+const roomCache = new Map<string, { room: Room; expiresAt: number }>();
+
+const cacheRoom = (code: string, room: Room): void => {
+  roomCache.set(code, { room, expiresAt: Date.now() + ROOM_CACHE_TTL_MS });
+};
+
+const invalidateRoomCache = (code: string): void => {
+  roomCache.delete(code);
+};
+
+/**
  * Wait for database connection to be ready
  * Retries up to 10 times with 500ms delay between attempts (max 5 seconds wait)
  * Handles both disconnected (0) and connecting (2) states
@@ -112,6 +131,11 @@ export const createRoom = async (data?: CreateRoomRequest): Promise<Room> => {
 };
 
 export const getRoomByCode = async (code: string): Promise<Room | null> => {
+  const cached = roomCache.get(code);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.room;
+  }
+
   // Wait for database connection if not ready
   if (mongoose.connection.readyState !== 1) {
     const isReady = await waitForDatabase();
@@ -124,7 +148,9 @@ export const getRoomByCode = async (code: string): Promise<Room | null> => {
   try {
     const room = await RoomModel.findOne({ code });
     if (!room) return null;
-    return room.toObject();
+    const result = room.toObject();
+    cacheRoom(code, result);
+    return result;
   } catch (error: any) {
     logger.error('Error getting room by code', { 
       code,
@@ -255,6 +281,7 @@ export const endRoom = async (code: string, userId: string): Promise<Room> => {
     }
 
     logger.info('Room ended', { code, endedBy: userId });
+    invalidateRoomCache(code);
     return room.toObject();
   } catch (error: any) {
     logger.error('Error ending room', { 
@@ -283,6 +310,7 @@ export const removeParticipant = async (code: string, userId: string): Promise<R
     }
 
     logger.info('Participant removed from room', { code, userId });
+    invalidateRoomCache(code);
     return room.toObject();
   } catch (error: any) {
     logger.error('Error removing participant', { 
@@ -310,6 +338,7 @@ export const unlockRoom = async (code: string): Promise<Room> => {
   }
 
   logger.info('Room unlocked', { code });
+  invalidateRoomCache(code);
   return room.toObject();
 };
 
@@ -339,6 +368,7 @@ export const transferRoomOwnership = async (
   }
 
   logger.info('Room ownership transferred', { code, newOwnerId });
+  invalidateRoomCache(code);
   return room.toObject();
 };
 
@@ -357,6 +387,7 @@ export const addRoomCoHost = async (code: string, userId: string): Promise<Room>
     throw new Error('Room not found');
   }
 
+  invalidateRoomCache(code);
   return room.toObject();
 };
 
@@ -375,6 +406,7 @@ export const removeRoomCoHost = async (code: string, userId: string): Promise<Ro
     throw new Error('Room not found');
   }
 
+  invalidateRoomCache(code);
   return room.toObject();
 };
 
@@ -398,6 +430,7 @@ export const setRoomSlowMode = async (
     throw new Error('Room not found');
   }
 
+  invalidateRoomCache(code);
   return room.toObject();
 };
 
@@ -419,6 +452,7 @@ export const setParticipantsCanSend = async (
     throw new Error('Room not found');
   }
 
+  invalidateRoomCache(code);
   return room.toObject();
 };
 
@@ -440,6 +474,7 @@ export const setJoinLocked = async (
     throw new Error('Room not found');
   }
 
+  invalidateRoomCache(code);
   return room.toObject();
 };
 
@@ -464,6 +499,7 @@ export const lockRoom = async (code: string): Promise<Room> => {
     }
 
     logger.info('Room locked', { code, lockedAt: room.lockedAt });
+    invalidateRoomCache(code);
     return room.toObject();
   } catch (error: any) {
     logger.error('Error locking room', { 

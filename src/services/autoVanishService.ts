@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
-import { SponsorBannerModel } from '../models/SponsorBanner.js';
+import { RoomBannerAssignmentModel } from '../models/RoomBannerAssignment.js';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { deleteRoomFiles } from './gcsService.js';
 import { logger } from '../utils/logger.js';
@@ -43,11 +43,11 @@ const permanentlyDeleteRoom = async (roomCode: string): Promise<void> => {
     const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
     logger.debug(`Deleted ${messageDeleteResult.deletedCount} messages from room ${roomCode}`);
 
-    // 2b. Delete the room's sponsor/event banner, if any (its image lived under the
-    // room's own storage prefix, already removed by deleteRoomFiles above).
-    await SponsorBannerModel.deleteOne({ roomCode }).catch((bannerError: unknown) => {
-      logger.warn(`Failed to delete sponsor banner for room ${roomCode} (non-critical)`, {
-        error: bannerError instanceof Error ? bannerError.message : String(bannerError),
+    // 2b. Drop this room's sponsor-banner assignment, if any. The banner ASSET itself is a
+    // reusable library item that may be assigned to other rooms too, so it's left untouched.
+    await RoomBannerAssignmentModel.deleteOne({ roomCode }).catch((assignmentError: unknown) => {
+      logger.warn(`Failed to delete banner assignment for room ${roomCode} (non-critical)`, {
+        error: assignmentError instanceof Error ? assignmentError.message : String(assignmentError),
       });
     });
 

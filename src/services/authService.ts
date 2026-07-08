@@ -49,6 +49,8 @@ export interface AuthTokens {
     name: string;
     avatar?: string;
     plan: UserPlan;
+    role: string;
+    credits: number;
   };
 }
 
@@ -124,6 +126,8 @@ export const issueTokensForUser = async (user: IUser & { _id: { toString(): stri
       name: user.name,
       avatar: user.avatar,
       plan: user.plan,
+      role: user.role,
+      credits: user.credits,
     },
   };
 };

@@ -11,11 +11,17 @@ export const createMessage = async (
   type: 'text' | 'file' = 'text',
   fileMeta?: Message['fileMeta'],
   replyTo?: string,
-  avatar?: string
+  avatar?: string,
+  // Callers that already fetched the room (e.g. sendMessage, which loads it to
+  // check isLocked/slow-mode) should pass its expiresAt here to skip this
+  // otherwise-redundant Mongo round trip on every message send. Falls back to
+  // querying it when omitted (system messages, etc.).
+  roomExpiresAt?: Date,
 ): Promise<Message> => {
-  // Get room to set message expiry matching room expiry
-  const room = await RoomModel.findOne({ code: roomCode }).select('expiresAt').lean();
-  
+  const expiresAt =
+    roomExpiresAt ??
+    (await RoomModel.findOne({ code: roomCode }).select('expiresAt').lean())?.expiresAt;
+
   const message = new MessageModel({
     id: uuidv4(),
     roomCode,
@@ -29,7 +35,7 @@ export const createMessage = async (
     reactions: {},
     isPinned: false,
     createdAt: new Date(),
-    expiresAt: room?.expiresAt, // TTL sync with room expiry
+    expiresAt, // TTL sync with room expiry
   });
 
   await message.save();
