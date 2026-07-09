@@ -8,7 +8,7 @@ import { logger } from '../../utils/logger.js';
 import { sanitizeName } from '../../utils/sanitize.js';
 import { emitAdminInsightUpdate } from '../adminHandlers.js';
 import { HandlerContext, stripHeavyContentForJoin } from './types.js';
-import { clearPendingDeletionTimer, hasPendingDeletion } from './roomLifecycleHandlers.js';
+import { clearPendingDeletionTimer, hasPendingDeletion, clearPendingUserLeaveTimer } from './roomLifecycleHandlers.js';
 import { getScreenSharePublicState } from '../screenShareState.js';
 import { recordFailedJoin } from '../../services/platformMetricsService.js';
 import { isUserKicked } from '../../services/roomModerationService.js';
@@ -299,6 +299,9 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       user.nickname = nickname;
       (socket as any).data = { user };
       socket.join(code);
+      // A pending grace-period removal (started on a prior disconnect for this
+      // same user+room) is now moot — they're back.
+      clearPendingUserLeaveTimer(code, user.userId);
 
       const redis = getRedis();
       if (redis && isRedisAvailable()) {

@@ -13,24 +13,43 @@ import { registerModerationHandlers } from './handlers/moderationHandlers.js';
 import { registerRoomAdminHandlers } from './handlers/roomAdminHandlers.js';
 import { recordReconnect } from '../services/platformMetricsService.js';
 import { trackSocketConnected, trackSocketDisconnected } from '../services/metricsService.js';
+import { clearPendingUserLeaveTimer } from './handlers/roomLifecycleHandlers.js';
 
 // Re-export for backward compatibility (adminRoomService imports this)
 export { clearPendingDeletionTimer } from './handlers/roomLifecycleHandlers.js';
 
 export const handleSocketConnection = (io: Server, socket: Socket): void => {
-  if ((socket as any).recovered) {
+  const recovered = (socket as any).recovered === true;
+  if (recovered) {
     recordReconnect();
   }
 
   trackSocketConnected();
   socket.on('disconnect', () => trackSocketDisconnected());
 
+  // On a successful connectionStateRecovery, Socket.IO already restores
+  // socket.data (including the `user` object we stash there in joinHandlers)
+  // before the 'connection' event fires. Reuse it instead of building a blank
+  // user with roomCode: '' — otherwise ensureUserInRoom() (which gates
+  // sendMessage/typing/edits/reactions) would wrongly fail right after a
+  // "successful" silent recovery, since the client intentionally skips
+  // re-emitting joinRoom in that case.
+  const recoveredUser = recovered ? ((socket as any).data?.user as SocketUser | undefined) : undefined;
+
   const authUserId = socket.handshake.auth?.userId;
-  const user: SocketUser = {
+  const user: SocketUser = recoveredUser ?? {
     userId: (authUserId && typeof authUserId === 'string' && authUserId.trim()) ? authUserId.trim() : uuidv4(),
     nickname: socket.handshake.auth?.nickname || 'Anonymous',
     roomCode: '',
   };
+  (socket as any).data = { user };
+
+  // Recovery means this connection never went through joinRoom again — clear
+  // any grace-period removal timer started by the disconnect that preceded
+  // this recovery, since the user is provably still here.
+  if (recovered && user.roomCode) {
+    clearPendingUserLeaveTimer(user.roomCode, user.userId);
+  }
 
   const typingUsers = new Map<string, NodeJS.Timeout>();
 

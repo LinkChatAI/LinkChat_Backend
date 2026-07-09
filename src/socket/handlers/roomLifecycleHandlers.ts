@@ -40,6 +40,31 @@ export const clearPendingDeletionTimer = (roomCode: string): void => {
   }
 };
 
+// Grace-period timers for non-admin participants who disconnect (mobile app
+// switch, brief network drop, tab close without an explicit leave). Mirrors
+// the admin pendingDeletionTimers pattern above but scoped per user+room and
+// on a much shorter fuse — we defer actually removing them from the room
+// instead of doing it the instant the transport drops, so a reconnect within
+// the window (recovered silently or via full rejoin) never shows them as
+// having left and never frees their nickname out from under them.
+const USER_LEAVE_GRACE_MS = 20 * 60 * 1000; // 20 minutes
+const pendingUserLeaveTimers = new Map<string, NodeJS.Timeout>();
+
+const userLeaveTimerKey = (roomCode: string, userId: string): string => `${roomCode}:${userId}`;
+
+export const hasPendingUserLeaveTimer = (roomCode: string, userId: string): boolean =>
+  pendingUserLeaveTimers.has(userLeaveTimerKey(roomCode, userId));
+
+export const clearPendingUserLeaveTimer = (roomCode: string, userId: string): void => {
+  const key = userLeaveTimerKey(roomCode, userId);
+  const timer = pendingUserLeaveTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    pendingUserLeaveTimers.delete(key);
+    logger.info(`Cleared pending leave timer for user ${userId} in room ${roomCode}`);
+  }
+};
+
 const destroyRoomAfterGracePeriod = async (io: Server, roomCode: string, adminUserId: string): Promise<void> => {
   try {
     logger.info(`Grace period expired for room ${roomCode}, destroying room`);
@@ -347,7 +372,37 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
 
           logger.info(`Grace period timer started for room ${roomCodeForTimer}, expires in 1 hour`);
         } else {
-          await handleUserLeaveRoom(user.roomCode, user.userId, false);
+          // Don't remove the participant the instant the transport drops — mobile
+          // backgrounding/app-switching and brief network blips look identical to a
+          // real leave at this point. Give them a grace window to reconnect (silent
+          // recovery or a full rejoin both clear this timer) before actually
+          // tearing down their room membership/nickname reservation.
+          const roomCodeForUserTimer = user.roomCode;
+          const userIdForTimer = user.userId;
+          clearPendingUserLeaveTimer(roomCodeForUserTimer, userIdForTimer);
+
+          const timer = setTimeout(() => {
+            pendingUserLeaveTimers.delete(userLeaveTimerKey(roomCodeForUserTimer, userIdForTimer));
+            (async () => {
+              try {
+                // Guard against a still-connected second tab/device for the same
+                // user — don't punish them for one connection dropping if another
+                // is still active in the room.
+                const stillPresent = (await getCachedRoomSockets(io, roomCodeForUserTimer)).some(
+                  (s: any) => s.data?.user?.userId === userIdForTimer
+                );
+                if (stillPresent) return;
+                await handleUserLeaveRoom(roomCodeForUserTimer, userIdForTimer, false);
+              } catch (err: any) {
+                logger.error('Error running deferred user leave', {
+                  error: err instanceof Error ? err.message : String(err),
+                  roomCode: roomCodeForUserTimer, userId: userIdForTimer,
+                });
+              }
+            })();
+          }, USER_LEAVE_GRACE_MS);
+
+          pendingUserLeaveTimers.set(userLeaveTimerKey(roomCodeForUserTimer, userIdForTimer), timer);
         }
 
         user.roomCode = '';
