@@ -8,6 +8,15 @@ export interface HandlerContext {
   typingUsers: Map<string, NodeJS.Timeout>;
   ensureUserInRoom: () => boolean;
   emitErrorAlert: (error: any, defaultMessage: string) => void;
+  /**
+   * Resolves once `user.isGhost` has been set from the server-side session
+   * check. Handlers that read `user.isGhost` before a room join (chiefly
+   * `joinRoom`) must `await` this first — it's not awaited at connection
+   * time so handler registration stays synchronous with the 'connection'
+   * event (an immediate client emit must never be dropped for lack of a
+   * listener).
+   */
+  ghostReady: Promise<void>;
 }
 
 export const normalizeMessageType = (message: Message): Message => {

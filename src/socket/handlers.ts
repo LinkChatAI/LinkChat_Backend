@@ -14,6 +14,7 @@ import { registerRoomAdminHandlers } from './handlers/roomAdminHandlers.js';
 import { recordReconnect } from '../services/platformMetricsService.js';
 import { trackSocketConnected, trackSocketDisconnected } from '../services/metricsService.js';
 import { clearPendingUserLeaveTimer } from './handlers/roomLifecycleHandlers.js';
+import { resolveGhostModeFromSocket } from '../utils/ghostMode.js';
 
 // Re-export for backward compatibility (adminRoomService imports this)
 export { clearPendingDeletionTimer } from './handlers/roomLifecycleHandlers.js';
@@ -43,6 +44,18 @@ export const handleSocketConnection = (io: Server, socket: Socket): void => {
     roomCode: '',
   };
   (socket as any).data = { user };
+
+  // Resolve Ghost Mode from the httpOnly session cookie in the background.
+  // Deliberately not awaited here — registration of the event handlers below
+  // must stay in the same tick as 'connection', otherwise a client that
+  // emits joinRoom immediately on connect could have it dropped before a
+  // listener exists. A recovered connection already carries `isGhost` on the
+  // restored user object, so there's nothing to re-resolve.
+  const ghostReady: Promise<void> = recoveredUser
+    ? Promise.resolve()
+    : resolveGhostModeFromSocket(socket).then((isGhost) => {
+        user.isGhost = isGhost;
+      });
 
   // Recovery means this connection never went through joinRoom again — clear
   // any grace-period removal timer started by the disconnect that preceded
@@ -78,6 +91,7 @@ export const handleSocketConnection = (io: Server, socket: Socket): void => {
     typingUsers,
     ensureUserInRoom,
     emitErrorAlert,
+    ghostReady,
   };
 
   registerJoinHandlers(ctx);

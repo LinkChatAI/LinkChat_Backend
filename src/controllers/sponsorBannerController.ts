@@ -1,9 +1,10 @@
 import { Request, Response } from 'express';
 import { SponsorBannerModel, DEFAULT_BANNER_BACKGROUND_OPACITY, IBannerFraming } from '../models/SponsorBanner.js';
 import { RoomBannerAssignmentModel } from '../models/RoomBannerAssignment.js';
+import { DefaultBannerSettingModel } from '../models/DefaultBannerSetting.js';
 import { RoomModel } from '../models/Room.js';
 import { logger } from '../utils/logger.js';
-import { broadcastRoomBannerUpdate, broadcastRoomBannerRemoved } from '../services/roomBannerBroadcast.js';
+import { broadcastRoomBannerUpdate, broadcastDefaultBannerUpdate } from '../services/roomBannerBroadcast.js';
 
 const MAX_TITLE_LENGTH = 150;
 
@@ -105,13 +106,19 @@ const applyRoomAssignments = async (
 export const listBanners = async (_req: Request, res: Response): Promise<void> => {
   try {
     const banners = await SponsorBannerModel.find({}).sort({ updatedAt: -1 }).lean();
-    const roomsByBanner = await getAssignedRoomCodesByBanner();
+    const [roomsByBanner, defaultSetting] = await Promise.all([
+      getAssignedRoomCodesByBanner(),
+      DefaultBannerSettingModel.findById('global').select('bannerId').lean(),
+    ]);
+    const defaultBannerId = defaultSetting ? String(defaultSetting.bannerId) : null;
 
     res.json({
       banners: banners.map((b) => ({
         ...b,
         assignedRoomCodes: roomsByBanner.get(String(b._id)) || [],
+        isDefault: defaultBannerId === String(b._id),
       })),
+      defaultBannerId,
     });
   } catch (error: unknown) {
     logger.error('Error listing sponsor banners', {
@@ -206,7 +213,9 @@ export const updateBanner = async (req: Request, res: Response): Promise<void> =
 
     await Promise.all([
       ...assignedRoomCodes.map((code) => broadcastRoomBannerUpdate(code)),
-      ...removedRoomCodes.map((code) => broadcastRoomBannerRemoved(code)),
+      // A room that lost this assignment re-resolves and falls back to the default banner
+      // (if any) instead of always going blank — same broadcast helper handles both cases.
+      ...removedRoomCodes.map((code) => broadcastRoomBannerUpdate(code)),
     ]);
 
     res.json({ banner: { ...banner.toObject(), assignedRoomCodes } });
@@ -230,7 +239,15 @@ export const deleteBanner = async (req: Request, res: Response): Promise<void> =
 
     const assignments = await RoomBannerAssignmentModel.find({ bannerId: id }).select('roomCode').lean();
     await RoomBannerAssignmentModel.deleteMany({ bannerId: id });
-    await Promise.all(assignments.map((a) => broadcastRoomBannerRemoved(a.roomCode)));
+    // Each affected room re-resolves — falls back to the default banner (if any) rather than
+    // always going blank.
+    await Promise.all(assignments.map((a) => broadcastRoomBannerUpdate(a.roomCode)));
+
+    const defaultSetting = await DefaultBannerSettingModel.findById('global').select('bannerId').lean();
+    if (defaultSetting && String(defaultSetting.bannerId) === id) {
+      await DefaultBannerSettingModel.findByIdAndDelete('global');
+      void broadcastDefaultBannerUpdate();
+    }
 
     res.json({ success: true });
   } catch (error: unknown) {
@@ -342,7 +359,8 @@ export const unassignRoomBanner = async (req: Request, res: Response): Promise<v
       return;
     }
 
-    void broadcastRoomBannerRemoved(roomCode);
+    // Falls back to the default banner (if any) instead of always going blank.
+    void broadcastRoomBannerUpdate(roomCode);
 
     res.json({ success: true });
   } catch (error: unknown) {
@@ -350,5 +368,60 @@ export const unassignRoomBanner = async (req: Request, res: Response): Promise<v
       error: error instanceof Error ? error.message : String(error),
     });
     res.status(500).json({ error: 'Failed to unassign banner from room' });
+  }
+};
+
+/** PUT /api/admin/default-banner — set the platform-wide default banner, shown in every room
+ *  that has no room-specific assignment (existing rooms and any created afterward). Never
+ *  touches rooms that already have their own banner assigned. */
+export const setDefaultBanner = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { bannerId } = req.body as { bannerId?: string };
+    if (!bannerId || typeof bannerId !== 'string') {
+      res.status(400).json({ error: 'bannerId is required' });
+      return;
+    }
+
+    const banner = await SponsorBannerModel.findById(bannerId).select('_id').lean();
+    if (!banner) {
+      res.status(404).json({ error: 'Banner not found' });
+      return;
+    }
+
+    await DefaultBannerSettingModel.findByIdAndUpdate(
+      'global',
+      { _id: 'global', bannerId },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    void broadcastDefaultBannerUpdate();
+
+    res.json({ success: true, defaultBannerId: bannerId });
+  } catch (error: unknown) {
+    logger.error('Error setting default banner', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    res.status(500).json({ error: 'Failed to set default banner' });
+  }
+};
+
+/** DELETE /api/admin/default-banner — clear the platform default. Rooms with their own
+ *  assignment are unaffected; rooms that were only showing the default go blank. */
+export const clearDefaultBanner = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await DefaultBannerSettingModel.findByIdAndDelete('global');
+    if (!result) {
+      res.status(404).json({ error: 'No default banner is set' });
+      return;
+    }
+
+    void broadcastDefaultBannerUpdate();
+
+    res.json({ success: true });
+  } catch (error: unknown) {
+    logger.error('Error clearing default banner', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    res.status(500).json({ error: 'Failed to clear default banner' });
   }
 };

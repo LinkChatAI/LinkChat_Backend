@@ -34,7 +34,7 @@ export const registerModerationHandlers = (ctx: HandlerContext): void => {
 
       for (const s of sockets) {
         const su = (s as any).data?.user as SocketUser | undefined;
-        if (!su?.userId || seen.has(su.userId)) continue;
+        if (!su?.userId || su.isGhost || seen.has(su.userId)) continue;
         seen.add(su.userId);
         participants.push({
           userId: su.userId,
@@ -57,7 +57,10 @@ export const registerModerationHandlers = (ctx: HandlerContext): void => {
     }
     const authUserId = socket.handshake.auth?.userId || user.userId;
     const room = await getRoomByCode(user.roomCode);
-    if (!canModerateRoom(room, authUserId)) {
+    // Ghost Mode grants read-only visibility into any room's participant
+    // list for monitoring — it does not grant moderation actions (mute/kick
+    // remain gated to the real host/co-hosts below, unchanged).
+    if (!user.isGhost && !canModerateRoom(room, authUserId)) {
       socket.emit('error_unauthorized', { message: 'Only the host or co-hosts can view participants' });
       return;
     }
@@ -75,7 +78,7 @@ export const registerModerationHandlers = (ctx: HandlerContext): void => {
 
       for (const s of sockets) {
         const su = (s as any).data?.user as SocketUser | undefined;
-        if (!su?.userId || seen.has(su.userId)) continue;
+        if (!su?.userId || su.isGhost || seen.has(su.userId)) continue;
         seen.add(su.userId);
         participants.push({
           userId: su.userId,

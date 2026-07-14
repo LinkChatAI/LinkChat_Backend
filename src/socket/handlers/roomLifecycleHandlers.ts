@@ -12,7 +12,7 @@ import { clearScreenShareState } from '../screenShareState.js';
 import { clearRoomModeration } from '../../services/roomModerationService.js';
 import { clearSlowModeForRoom } from '../../services/slowModeService.js';
 import { clearRoomReceipts } from '../../services/readReceiptService.js';
-import { getCachedRoomSockets } from './socketCache.js';
+import { getCachedRoomSockets, getCachedRoomSocketCount } from './socketCache.js';
 import { setRoomParticipantCount } from '../../services/metricsService.js';
 
 const clearAllRoomState = (roomCode: string): void => {
@@ -169,12 +169,17 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
   ): Promise<void> => {
     if (!roomCodeToLeave || !roomCodeToLeave.trim()) return;
 
+    // A ghost never entered Redis/broadcasts on join, so mirror that exactly
+    // on the way out — same object as ctx.user, so this is already resolved
+    // by the time a leave can happen (joinRoom awaits ghostReady first).
+    const isGhost = user.isGhost === true;
+
     try {
       handleScreenShareParticipantLeft(io, roomCodeToLeave, userId);
 
       const redis = getRedis();
 
-      if (redis && isRedisAvailable()) {
+      if (!isGhost && redis && isRedisAvailable()) {
         try {
           await redis.srem(`room:${roomCodeToLeave}:users`, userId);
           await redis.del(`user:${userId}`);
@@ -194,65 +199,73 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
       }
 
       socket.leave(roomCodeToLeave);
-      socket.to(roomCodeToLeave).emit('user_left', { userId, roomId: roomCodeToLeave });
-
-      let userCount = 0;
-      if (redis && isRedisAvailable()) {
-        try {
-          userCount = await redis.scard(`room:${roomCodeToLeave}:users`);
-        } catch (error: any) {
-          // Redis errored mid-call — fetchSockets() is accurate across instances
-          // (unlike io.sockets.adapter.rooms, which only reflects this instance).
-          userCount = (await getCachedRoomSockets(io, roomCodeToLeave)).length;
-        }
-      } else {
-        userCount = (await getCachedRoomSockets(io, roomCodeToLeave)).length;
+      if (!isGhost) {
+        socket.to(roomCodeToLeave).emit('user_left', { userId, roomId: roomCodeToLeave });
       }
-      io.to(roomCodeToLeave).emit('userCount', { count: userCount });
-      setRoomParticipantCount(roomCodeToLeave, userCount);
+
+      // Ghost was never counted, so the count hasn't actually changed — skip
+      // the broadcast rather than re-emitting the same number.
+      if (!isGhost) {
+        let userCount = 0;
+        if (redis && isRedisAvailable()) {
+          try {
+            userCount = await redis.scard(`room:${roomCodeToLeave}:users`);
+          } catch (error: any) {
+            // Redis errored mid-call — fetchSockets() is accurate across instances
+            // (unlike io.sockets.adapter.rooms, which only reflects this instance).
+            userCount = await getCachedRoomSocketCount(io, roomCodeToLeave);
+          }
+        } else {
+          userCount = await getCachedRoomSocketCount(io, roomCodeToLeave);
+        }
+        io.to(roomCodeToLeave).emit('userCount', { count: userCount });
+        setRoomParticipantCount(roomCodeToLeave, userCount);
+      }
 
       if (shouldEmitRoomLeft) {
         socket.emit('roomLeft', { roomId: roomCodeToLeave });
       }
 
-      logger.info(`User ${userId} left room ${roomCodeToLeave}`);
+      logger.info(`${isGhost ? 'Ghost admin' : 'User'} ${userId} left room ${roomCodeToLeave}`);
 
-      try {
-        const { UserVisitModel } = await import('../../models/UserVisit.js');
-        const { MessageModel: MsgModel } = await import('../../models/Message.js');
+      if (!isGhost) {
+        try {
+          const { UserVisitModel } = await import('../../models/UserVisit.js');
+          const { MessageModel: MsgModel } = await import('../../models/Message.js');
 
-        const visit = await UserVisitModel.findOne({
-          userId,
-          roomCode: roomCodeToLeave,
-          leftAt: { $exists: false },
-        }).sort({ joinedAt: -1 });
-
-        if (visit) {
-          const leftAt = new Date();
-          const sessionDuration = leftAt.getTime() - visit.joinedAt.getTime();
-          const messagesSent = await MsgModel.countDocuments({
+          const visit = await UserVisitModel.findOne({
             userId,
             roomCode: roomCodeToLeave,
-            createdAt: { $gte: visit.joinedAt, $lte: leftAt },
-          });
-          await UserVisitModel.updateOne(
-            { _id: visit._id },
-            { $set: { leftAt, sessionDuration, messagesSent } }
-          );
-        }
-      } catch (visitError: any) {
-        logger.warn('Failed to update user visit on leave', {
-          error: visitError instanceof Error ? visitError.message : String(visitError),
-          userId, roomCode: roomCodeToLeave,
-        });
-      }
+            leftAt: { $exists: false },
+          }).sort({ joinedAt: -1 });
 
-      if (shouldEmitRoomLeft) {
-        emitAdminInsightUpdate(io, 'user_left', { roomCode: roomCodeToLeave, userId }).catch(err => {
-          logger.warn('Failed to emit admin insight update for user leave', {
-            error: err instanceof Error ? err.message : String(err),
+          if (visit) {
+            const leftAt = new Date();
+            const sessionDuration = leftAt.getTime() - visit.joinedAt.getTime();
+            const messagesSent = await MsgModel.countDocuments({
+              userId,
+              roomCode: roomCodeToLeave,
+              createdAt: { $gte: visit.joinedAt, $lte: leftAt },
+            });
+            await UserVisitModel.updateOne(
+              { _id: visit._id },
+              { $set: { leftAt, sessionDuration, messagesSent } }
+            );
+          }
+        } catch (visitError: any) {
+          logger.warn('Failed to update user visit on leave', {
+            error: visitError instanceof Error ? visitError.message : String(visitError),
+            userId, roomCode: roomCodeToLeave,
           });
-        });
+        }
+
+        if (shouldEmitRoomLeft) {
+          emitAdminInsightUpdate(io, 'user_left', { roomCode: roomCodeToLeave, userId }).catch(err => {
+            logger.warn('Failed to emit admin insight update for user leave', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
       }
     } catch (error: any) {
       logger.error('Error in handleUserLeaveRoom', {

@@ -14,7 +14,7 @@ import { recordFailedJoin } from '../../services/platformMetricsService.js';
 import { isUserKicked } from '../../services/roomModerationService.js';
 import { getStorageLimitForPlan } from '../../constants/roomStorage.js';
 import type { RoomBannerPayload } from '../../services/roomBannerBroadcast.js';
-import { getCachedRoomSockets } from './socketCache.js';
+import { getCachedRoomSockets, getCachedRoomSocketCount } from './socketCache.js';
 import { setRoomParticipantCount } from '../../services/metricsService.js';
 
 const getRedis = () => getRedisClient();
@@ -30,7 +30,7 @@ const getOnlineParticipantSnapshots = async (
     const sockets = await getCachedRoomSockets(io, roomCode);
     for (const s of sockets) {
       const su = (s as { data?: { user?: SocketUser } }).data?.user;
-      if (!su?.userId || seen.has(su.userId)) continue;
+      if (!su?.userId || su.isGhost || seen.has(su.userId)) continue;
       seen.add(su.userId);
       participants.push({
         userId: su.userId,
@@ -76,7 +76,7 @@ const buildExistingNicknamesFallback = async (
       const socketData = (socketInRoom as any).data;
       if (socketData?.user) {
         const socketUser = socketData.user as SocketUser;
-        if (socketUser.userId !== excludeUserId && socketUser.nickname && socketUser.nickname !== 'Anonymous') {
+        if (socketUser.userId !== excludeUserId && !socketUser.isGhost && socketUser.nickname && socketUser.nickname !== 'Anonymous') {
           existingNicknames.add(socketUser.nickname.toLowerCase());
         }
       }
@@ -177,10 +177,14 @@ const ensureNicknameUniqueInRoom = async (
 };
 
 export const registerJoinHandlers = (ctx: HandlerContext): void => {
-  const { io, socket, user, ensureUserInRoom, emitErrorAlert } = ctx;
+  const { io, socket, user, ensureUserInRoom, emitErrorAlert, ghostReady } = ctx;
 
   socket.on('joinRoom', async (data: { code: string; nickname?: string; senderId?: string }) => {
     try {
+      // Must resolve before any of the isGhost checks below run — see
+      // HandlerContext.ghostReady for why this isn't awaited at connect time.
+      await ghostReady;
+
       if (!data || typeof data.code !== 'string' || !data.code.trim()) {
         logger.warn('Invalid joinRoom request', { data });
         recordFailedJoin();
@@ -230,7 +234,7 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       }
 
       const joinUserId = user.userId;
-      if (isUserKicked(code, joinUserId)) {
+      if (!user.isGhost && isUserKicked(code, joinUserId)) {
         recordFailedJoin(true);
         socket.emit('error', { message: 'You were removed from this room by the host' });
         return;
@@ -238,9 +242,10 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
 
       // Join lock: block genuinely new participants when host has locked the room to new joiners.
       // Existing participants (who were already in this room's Redis member set) are allowed through.
+      // Ghost Mode always bypasses the lock — a Super Admin monitoring a room is never a "new participant".
       const authUserId = socket.handshake.auth?.userId || joinUserId;
       const isOwnerJoining = room.ownerId && room.ownerId === authUserId;
-      if (room.joinLocked && !isOwnerJoining) {
+      if (!user.isGhost && room.joinLocked && !isOwnerJoining) {
         // Check if this user has previously been in the room (Redis set)
         let isReturningParticipant = false;
         const redis = getRedis();
@@ -266,7 +271,12 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       }
 
       let nickname: string;
-      if (data.nickname && typeof data.nickname === 'string' && data.nickname.trim()) {
+      if (user.isGhost) {
+        // No Redis nickname reservation — a ghost never appears in any
+        // participant-facing list, so it can never collide with (or take up)
+        // a real nickname slot in the room.
+        nickname = 'Ghost Admin';
+      } else if (data.nickname && typeof data.nickname === 'string' && data.nickname.trim()) {
         const providedNickname = sanitizeName(data.nickname.trim());
         nickname = await ensureNicknameUniqueInRoom(providedNickname, code, user.userId, io);
         if (nickname !== providedNickname) {
@@ -304,7 +314,7 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       clearPendingUserLeaveTimer(code, user.userId);
 
       const redis = getRedis();
-      if (redis && isRedisAvailable()) {
+      if (!user.isGhost && redis && isRedisAvailable()) {
         try {
           await redis.sadd(`room:${code}:users`, user.userId);
           await redis.hset(`user:${user.userId}`, {
@@ -371,76 +381,88 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         participants,
         banner,
       });
-      socket.to(code).emit('userJoined', { userId: user.userId, nickname: user.nickname });
-
-      let userCount = 0;
-      if (redis && isRedisAvailable()) {
-        try {
-          userCount = await redis.scard(`room:${code}:users`);
-        } catch (error: any) {
-          // Redis errored mid-call — fetchSockets() is accurate across instances
-          // (unlike io.sockets.adapter.rooms, which only reflects this instance).
-          userCount = (await getCachedRoomSockets(io, code)).length;
-        }
-      } else {
-        userCount = (await getCachedRoomSockets(io, code)).length;
+      if (!user.isGhost) {
+        socket.to(code).emit('userJoined', { userId: user.userId, nickname: user.nickname });
       }
-      io.to(code).emit('userCount', { count: userCount });
-      setRoomParticipantCount(code, userCount);
-      logger.info(`User ${user.userId} joined room ${code}`);
 
-      try {
-        const { UserVisitModel } = await import('../../models/UserVisit.js');
-        const { GlobalStatsModel } = await import('../../models/GlobalStats.js');
-        const { getSocketClientIp } = await import('../../utils/socketIp.js');
-        const { resolveGeoIp } = await import('../../services/geoIpService.js');
+      // A ghost was never added to the Redis member set (or counted by the
+      // fallback), so the count genuinely hasn't changed — skip the broadcast
+      // entirely rather than re-emitting an unchanged number.
+      if (!user.isGhost) {
+        let userCount = 0;
+        if (redis && isRedisAvailable()) {
+          try {
+            userCount = await redis.scard(`room:${code}:users`);
+          } catch (error: any) {
+            // Redis errored mid-call — fetchSockets() is accurate across instances
+            // (unlike io.sockets.adapter.rooms, which only reflects this instance).
+            userCount = await getCachedRoomSocketCount(io, code);
+          }
+        } else {
+          userCount = await getCachedRoomSocketCount(io, code);
+        }
+        io.to(code).emit('userCount', { count: userCount });
+        setRoomParticipantCount(code, userCount);
+      }
+      logger.info(`${user.isGhost ? 'Ghost admin' : 'User'} ${user.userId} joined room ${code}`);
 
-        const visit = await UserVisitModel.create({
-          userId: user.userId,
-          roomCode: code,
-          nickname: user.nickname,
-          joinedAt: new Date(),
-        });
+      // Ghost joins are excluded from visit analytics, global stats, and the
+      // admin insight feed entirely — a monitoring Super Admin must leave no
+      // trace, including in the platform's own internal dashboards.
+      if (!user.isGhost) {
+        try {
+          const { UserVisitModel } = await import('../../models/UserVisit.js');
+          const { GlobalStatsModel } = await import('../../models/GlobalStats.js');
+          const { getSocketClientIp } = await import('../../utils/socketIp.js');
+          const { resolveGeoIp } = await import('../../services/geoIpService.js');
 
-        // Resolve approximate (city-level) location from the public IP in the background —
-        // never blocks the join flow, and never uses browser GPS.
-        const clientIp = getSocketClientIp(socket);
-        resolveGeoIp(clientIp)
-          .then((geo) => {
-            if (!geo) return;
-            return UserVisitModel.findByIdAndUpdate(visit._id, {
-              ipAddress: geo.ip,
-              city: geo.city,
-              region: geo.region,
-              country: geo.country,
-              lat: geo.lat,
-              lon: geo.lon,
-            }).exec();
-          })
-          .catch((geoError: unknown) => {
-            logger.warn('GeoIP enrichment failed for user visit', {
-              error: geoError instanceof Error ? geoError.message : String(geoError),
-              userId: user.userId,
-            });
+          const visit = await UserVisitModel.create({
+            userId: user.userId,
+            roomCode: code,
+            nickname: user.nickname,
+            joinedAt: new Date(),
           });
 
-        await GlobalStatsModel.findOneAndUpdate(
-          { key: 'totalVisitsLifetime' },
-          { $inc: { value: 1 }, $set: { lastUpdated: new Date() } },
-          { upsert: true, new: true }
-        );
-      } catch (visitError: any) {
-        logger.warn('Failed to track user visit', {
-          error: visitError instanceof Error ? visitError.message : String(visitError),
-          userId: user.userId, roomCode: code,
+          // Resolve approximate (city-level) location from the public IP in the background —
+          // never blocks the join flow, and never uses browser GPS.
+          const clientIp = getSocketClientIp(socket);
+          resolveGeoIp(clientIp)
+            .then((geo) => {
+              if (!geo) return;
+              return UserVisitModel.findByIdAndUpdate(visit._id, {
+                ipAddress: geo.ip,
+                city: geo.city,
+                region: geo.region,
+                country: geo.country,
+                lat: geo.lat,
+                lon: geo.lon,
+              }).exec();
+            })
+            .catch((geoError: unknown) => {
+              logger.warn('GeoIP enrichment failed for user visit', {
+                error: geoError instanceof Error ? geoError.message : String(geoError),
+                userId: user.userId,
+              });
+            });
+
+          await GlobalStatsModel.findOneAndUpdate(
+            { key: 'totalVisitsLifetime' },
+            { $inc: { value: 1 }, $set: { lastUpdated: new Date() } },
+            { upsert: true, new: true }
+          );
+        } catch (visitError: any) {
+          logger.warn('Failed to track user visit', {
+            error: visitError instanceof Error ? visitError.message : String(visitError),
+            userId: user.userId, roomCode: code,
+          });
+        }
+
+        emitAdminInsightUpdate(io, 'user_joined', { roomCode: code, userId: user.userId }).catch(err => {
+          logger.warn('Failed to emit admin insight update for user join', {
+            error: err instanceof Error ? err.message : String(err),
+          });
         });
       }
-
-      emitAdminInsightUpdate(io, 'user_joined', { roomCode: code, userId: user.userId }).catch(err => {
-        logger.warn('Failed to emit admin insight update for user join', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
     } catch (error: any) {
       logger.error('Error joining room:', {
         error: error instanceof Error ? error.message : String(error),

@@ -53,6 +53,8 @@ interface EnvConfig {
   MONGO_MIN_POOL_SIZE: number;
   /** Comma-separated emails always treated as admin (RBAC bootstrap — auto-promoted on first check). */
   PERMANENT_ADMIN_EMAILS?: string;
+  /** Comma-separated emails granted Super Admin Ghost Mode (invisible room monitoring). Verified server-side only. */
+  GHOST_MODE_ADMIN_EMAILS: string;
 }
 
 const requiredEnvVars = [
@@ -119,6 +121,10 @@ const validateEnv = (): EnvConfig => {
     MONGO_MAX_POOL_SIZE: parseInt(process.env.MONGO_MAX_POOL_SIZE || '50', 10),
     MONGO_MIN_POOL_SIZE: parseInt(process.env.MONGO_MIN_POOL_SIZE || '5', 10),
     PERMANENT_ADMIN_EMAILS: process.env.PERMANENT_ADMIN_EMAILS,
+    // Hardcoded default so Ghost Mode works even if Cloud Run env config is
+    // incomplete (see prior GOOGLE_CLIENT_ID config-drift incident); still
+    // overridable via env var to add/remove Super Admins without a redeploy.
+    GHOST_MODE_ADMIN_EMAILS: process.env.GHOST_MODE_ADMIN_EMAILS || 'wordtheme44@gmail.com,m87.krishna@gmail.com',
   };
 };
 

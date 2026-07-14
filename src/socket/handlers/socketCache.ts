@@ -35,3 +35,13 @@ export const getCachedRoomSockets = (
 
   return promise;
 };
+
+/**
+ * Same as getCachedRoomSockets, but excludes ghost-mode sockets — the
+ * non-Redis / Redis-error fallback path for participant counting, so a
+ * connected Super Admin never inflates the count shown to real users.
+ */
+export const getCachedRoomSocketCount = async (io: Server, roomCode: string): Promise<number> => {
+  const sockets = await getCachedRoomSockets(io, roomCode);
+  return sockets.filter((s) => !(s as any).data?.user?.isGhost).length;
+};

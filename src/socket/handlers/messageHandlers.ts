@@ -652,7 +652,9 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
   });
 
   socket.on('typing', () => {
-    if (!user.roomCode) return;
+    // Ghost Mode must leave no trace — a typing indicator would reveal a
+    // silent viewer's presence just as plainly as a join notification would.
+    if (!user.roomCode || user.isGhost) return;
     socket.to(user.roomCode).emit('userTyping', { userId: user.userId, nickname: user.nickname });
     const key = `${user.roomCode}:${user.userId}`;
     if (typingUsers.has(key)) clearTimeout(typingUsers.get(key)!);
@@ -663,7 +665,7 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
   });
 
   socket.on('stopTyping', () => {
-    if (!user.roomCode) return;
+    if (!user.roomCode || user.isGhost) return;
     const key = `${user.roomCode}:${user.userId}`;
     if (typingUsers.has(key)) {
       clearTimeout(typingUsers.get(key)!);
@@ -678,6 +680,11 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
         logger.debug('markMessageSeen: user not in a room', { socketId: socket.id });
         return;
       }
+
+      // A read receipt would out a silent viewer just like a typing
+      // indicator would — and would permanently write their userId into the
+      // message's seenBy array, a persistent leak worse than a live event.
+      if (user.isGhost) return;
 
       if (!data || typeof data.messageId !== 'string' || !data.messageId.trim()) {
         logger.debug('markMessageSeen: invalid messageId', { socketId: socket.id });
@@ -720,6 +727,8 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
         logger.debug('markMessagesSeen: user not in a room', { socketId: socket.id });
         return;
       }
+
+      if (user.isGhost) return;
 
       if (!data || !Array.isArray(data.messageIds) || data.messageIds.length === 0) {
         logger.debug('markMessagesSeen: invalid messageIds', { socketId: socket.id });

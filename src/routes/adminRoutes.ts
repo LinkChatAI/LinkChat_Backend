@@ -25,6 +25,8 @@ import {
   listRoomBannerMappings,
   assignRoomBanner,
   unassignRoomBanner,
+  setDefaultBanner,
+  clearDefaultBanner,
 } from '../controllers/sponsorBannerController.js';
 import { getUserLocations } from '../controllers/userLocationController.js';
 import { authenticateAdmin } from '../middleware/adminAuth.js';
@@ -230,6 +232,23 @@ router.delete(
   rateLimiter('adminAction'),
   auditAdminAction('unassign_room_banner', { roomCode: ':roomCode' }),
   unassignRoomBanner
+);
+
+// Platform-wide default banner — the fallback shown in any room with no room-specific
+// assignment (existing rooms and every room created afterward). A separate resource from
+// /room-banners/* since it is room-agnostic, not a per-room mapping.
+router.put(
+  '/default-banner',
+  rateLimiter('adminAction'),
+  auditAdminAction('set_default_banner'),
+  setDefaultBanner
+);
+
+router.delete(
+  '/default-banner',
+  rateLimiter('adminAction'),
+  auditAdminAction('clear_default_banner'),
+  clearDefaultBanner
 );
 
 // Lightweight connectivity check for admin login
