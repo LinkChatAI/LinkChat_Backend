@@ -2,6 +2,7 @@ import { MessageModel } from '../models/Message.js';
 import { RoomModel } from '../models/Room.js';
 import { Message } from '../types/index.js';
 import { v4 as uuidv4 } from 'uuid';
+import { recordMessageCreated } from './dailyStatsService.js';
 
 export const createMessage = async (
   roomCode: string,
@@ -39,6 +40,16 @@ export const createMessage = async (
   });
 
   await message.save();
+  // Durable counters — Message documents are TTL-deleted when their room
+  // expires (see Message.ts's expireAfterSeconds index), so "Messages Sent
+  // Today" and the 30-day chart can't be answered correctly by counting live
+  // documents partway through the day. Fire-and-forget: never adds latency
+  // to the message-send path.
+  recordMessageCreated({
+    senderId: userId,
+    isFile: type === 'file',
+    fileSizeBytes: fileMeta?.size,
+  }).catch(() => {});
   return message.toObject();
 };
 

@@ -11,16 +11,27 @@ import { Server } from 'socket.io';
 import { clearRoomModeration } from './roomModerationService.js';
 import { clearSlowModeForRoom } from './slowModeService.js';
 import { clearRoomReceipts } from './readReceiptService.js';
+import { recordRoomVanished } from './dailyStatsService.js';
+import { getSettingsSync } from './adminSettingsService.js';
 
 // Auto-vanish runs every 5 minutes for timely processing
 const AUTO_VANISH_INTERVAL_MS = parseInt(process.env.AUTO_VANISH_INTERVAL_MS || '300000', 10); // 5 minutes default
-const AUTO_VANISH_HOURS = 24; // Rooms auto-vanish 24 hours after being locked
+const AUTO_VANISH_HOURS_DEFAULT = 24; // Rooms auto-vanish 24 hours after being locked
+
+/**
+ * The grace window is admin-configurable at runtime (dashboard → Settings).
+ * Read through this getter rather than a module constant so a change takes
+ * effect on the next worker tick without a redeploy; falls back to the
+ * historical 24h when unset or when settings can't be loaded.
+ */
+const getAutoVanishHours = (): number =>
+  getSettingsSync().autoVanishHours || AUTO_VANISH_HOURS_DEFAULT;
 
 /**
  * Calculate the auto-vanish timestamp (lockedAt + 24 hours)
  */
 const calculateAutoVanishAt = (lockedAt: Date): Date => {
-  return new Date(lockedAt.getTime() + AUTO_VANISH_HOURS * 60 * 60 * 1000);
+  return new Date(lockedAt.getTime() + getAutoVanishHours() * 60 * 60 * 1000);
 };
 
 /**
@@ -57,6 +68,7 @@ const permanentlyDeleteRoom = async (roomCode: string): Promise<void> => {
       logger.warn(`Room ${roomCode} was already deleted`);
     } else {
       logger.info(`Deleted room ${roomCode}`);
+      recordRoomVanished('auto').catch(() => {});
     }
 
     // 3b. Clear in-memory per-room state
@@ -107,7 +119,7 @@ export const processAutoVanish = async (): Promise<number> => {
 
   try {
     const now = new Date();
-    const twentyFourHoursAgo = new Date(now.getTime() - AUTO_VANISH_HOURS * 60 * 60 * 1000);
+    const twentyFourHoursAgo = new Date(now.getTime() - getAutoVanishHours() * 60 * 60 * 1000);
 
     // Find locked rooms where lockedAt is more than 24 hours ago
     // Only process rooms that are not already ended
@@ -195,7 +207,7 @@ export const recoverStuckRooms = async (): Promise<number> => {
 
   try {
     const now = new Date();
-    const twentyFourHoursAgo = new Date(now.getTime() - AUTO_VANISH_HOURS * 60 * 60 * 1000);
+    const twentyFourHoursAgo = new Date(now.getTime() - getAutoVanishHours() * 60 * 60 * 1000);
 
     // Find any locked rooms that should have been vanished
     const stuckRooms = await RoomModel.find({
@@ -276,7 +288,7 @@ export const recoverStuckRooms = async (): Promise<number> => {
 export const startAutoVanishWorker = (): NodeJS.Timeout => {
   logger.info('Starting auto-vanish worker', {
     intervalMs: AUTO_VANISH_INTERVAL_MS,
-    autoVanishHours: AUTO_VANISH_HOURS,
+    autoVanishHours: getAutoVanishHours(),
   });
 
   // Run recovery immediately on startup (fail-safe)
@@ -315,14 +327,14 @@ export const getRoomsVanishingSoon = async (hours: number = 1): Promise<number> 
   try {
     const now = new Date();
     const targetTime = new Date(now.getTime() + hours * 60 * 60 * 1000);
-    const minLockedAt = new Date(targetTime.getTime() - AUTO_VANISH_HOURS * 60 * 60 * 1000);
+    const minLockedAt = new Date(targetTime.getTime() - getAutoVanishHours() * 60 * 60 * 1000);
 
     const count = await RoomModel.countDocuments({
       isLocked: true,
       lockedAt: {
         $exists: true,
         $gte: minLockedAt,
-        $lt: new Date(now.getTime() - (AUTO_VANISH_HOURS - hours) * 60 * 60 * 1000),
+        $lt: new Date(now.getTime() - (getAutoVanishHours() - hours) * 60 * 60 * 1000),
       },
       isEnded: { $ne: true },
       expiresAt: { $gt: now },

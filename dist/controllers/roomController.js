@@ -13,6 +13,7 @@ import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
 import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
 import { getStorageLimitForPlan } from '../constants/roomStorage.js';
+import { getSettings } from '../services/adminSettingsService.js';
 const VALID_PLANS = ['free', 'premium', 'pro', 'enterprise'];
 const createRoomSchema = z.object({
     name: z.string().max(100).optional(),
@@ -29,6 +30,16 @@ export const createRoomHandler = async (req, res) => {
     try {
         const body = createRoomSchema.parse(req.body);
         const requestedPlan = body.plan || 'free';
+        // Runtime kill switch (admin dashboard → Settings). Served from an
+        // in-process cache, so this is a memory read, not a DB round trip.
+        const settings = await getSettings();
+        if (!settings.roomCreationEnabled) {
+            res.status(503).json({
+                error: settings.maintenanceMessage || 'Room creation is temporarily disabled.',
+                code: 'ROOM_CREATION_DISABLED',
+            });
+            return;
+        }
         if (requestedPlan !== 'free') {
             if (!req.user) {
                 res.status(401).json({

@@ -23,6 +23,12 @@ interface EnvConfig {
     GOOGLE_CLIENT_SECRET?: string;
     GOOGLE_OAUTH_REDIRECT_URI?: string;
     USER_JWT_SECRET?: string;
+    MONGO_MAX_POOL_SIZE: number;
+    MONGO_MIN_POOL_SIZE: number;
+    /** Comma-separated emails always treated as admin (RBAC bootstrap — auto-promoted on first check). */
+    PERMANENT_ADMIN_EMAILS?: string;
+    /** Comma-separated emails granted Super Admin Ghost Mode (invisible room monitoring). Verified server-side only. */
+    GHOST_MODE_ADMIN_EMAILS: string;
 }
 export declare const env: EnvConfig;
 export {};

@@ -16,6 +16,9 @@ import { getStorageLimitForPlan } from '../../constants/roomStorage.js';
 import type { RoomBannerPayload } from '../../services/roomBannerBroadcast.js';
 import { getCachedRoomSockets, getCachedRoomSocketCount } from './socketCache.js';
 import { setRoomParticipantCount } from '../../services/metricsService.js';
+import { recordPeakConcurrent, recordUniqueVisitor } from '../../services/dailyStatsService.js';
+import { getSettingsSync } from '../../services/adminSettingsService.js';
+import { getLiveUserCountsForRooms } from '../../services/roomPresenceService.js';
 
 const getRedis = () => getRedisClient();
 
@@ -240,6 +243,29 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         return;
       }
 
+      // Participant cap (admin dashboard → Settings; 0 = unlimited, the
+      // historical behaviour). Reads the in-process settings cache, then one
+      // pipelined Redis SCARD that the join path already performs elsewhere —
+      // no Mongo round trip is added. Ghosts and the owner always bypass, so
+      // a full room can never lock out its own host.
+      const participantCap = getSettingsSync().maxParticipantsPerRoom;
+      if (participantCap > 0 && !user.isGhost && room.ownerId !== joinUserId) {
+        try {
+          const counts = await getLiveUserCountsForRooms(io, [code]);
+          const current = counts.get(code) ?? 0;
+          if (current >= participantCap) {
+            recordFailedJoin(true);
+            socket.emit('error', {
+              message: `This room is full (${participantCap} participant limit).`,
+            });
+            return;
+          }
+        } catch {
+          // Presence lookup failed — fail open rather than block a legitimate
+          // join on a Redis blip. Consistent with the platform's Redis policy.
+        }
+      }
+
       // Join lock: block genuinely new participants when host has locked the room to new joiners.
       // Existing participants (who were already in this room's Redis member set) are allowed through.
       // Ghost Mode always bypasses the lock — a Super Admin monitoring a room is never a "new participant".
@@ -386,23 +412,31 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
       }
 
       // A ghost was never added to the Redis member set (or counted by the
-      // fallback), so the count genuinely hasn't changed — skip the broadcast
-      // entirely rather than re-emitting an unchanged number.
-      if (!user.isGhost) {
-        let userCount = 0;
-        if (redis && isRedisAvailable()) {
-          try {
-            userCount = await redis.scard(`room:${code}:users`);
-          } catch (error: any) {
-            // Redis errored mid-call — fetchSockets() is accurate across instances
-            // (unlike io.sockets.adapter.rooms, which only reflects this instance).
-            userCount = await getCachedRoomSocketCount(io, code);
-          }
-        } else {
+      // fallback), so the count genuinely hasn't changed for everyone else —
+      // but the ghost's own client still needs the real number for
+      // monitoring, it just must never be broadcast to (or attributed to)
+      // anyone else. Always compute it; branch only on delivery.
+      let userCount = 0;
+      if (redis && isRedisAvailable()) {
+        try {
+          userCount = await redis.scard(`room:${code}:users`);
+        } catch (error: any) {
+          // Redis errored mid-call — fetchSockets() is accurate across instances
+          // (unlike io.sockets.adapter.rooms, which only reflects this instance).
           userCount = await getCachedRoomSocketCount(io, code);
         }
+      } else {
+        userCount = await getCachedRoomSocketCount(io, code);
+      }
+
+      if (!user.isGhost) {
         io.to(code).emit('userCount', { count: userCount });
         setRoomParticipantCount(code, userCount);
+        recordPeakConcurrent(userCount).catch(() => {});
+      } else {
+        // Ghost-only delivery — no room broadcast, no room-level metric
+        // writes (the real count hasn't changed, so those already reflect it).
+        socket.emit('userCount', { count: userCount });
       }
       logger.info(`${user.isGhost ? 'Ghost admin' : 'User'} ${user.userId} joined room ${code}`);
 
@@ -450,6 +484,7 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
             { $inc: { value: 1 }, $set: { lastUpdated: new Date() } },
             { upsert: true, new: true }
           );
+          recordUniqueVisitor(user.userId).catch(() => {});
         } catch (visitError: any) {
           logger.warn('Failed to track user visit', {
             error: visitError instanceof Error ? visitError.message : String(visitError),

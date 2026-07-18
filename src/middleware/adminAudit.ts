@@ -31,8 +31,20 @@ export const auditAdminAction = (
     // Override res.json to capture response
     const originalJson = res.json.bind(res);
     res.json = function (body: any) {
+      // A cache HIT means cacheAdminResponse (middleware/adminCache.ts) already
+      // set this header and short-circuited straight to res.json — nothing new
+      // was computed or accessed beyond a Redis read. Skipping the audit write
+      // here changes the trail from "every viewer, every time" to "first
+      // viewer per cache window" for these read-only GET analytics endpoints.
+      // Safe by construction: caching is only ever attached to read-only GET
+      // routes (see adminRoutes.ts), never to mutating ones, so this can never
+      // suppress an audit row for an actual admin action.
+      if (res.getHeader('X-Cache') === 'HIT') {
+        return originalJson(body);
+      }
+
       const responseTime = Date.now() - startTime;
-      
+
       // Log audit asynchronously (don't block response)
       AdminActionModel.create({
         adminId,

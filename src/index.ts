@@ -29,6 +29,7 @@ import adminUserRoutes from './routes/adminUserRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { authenticateAdmin } from './middleware/adminAuth.js';
 import { startCleanupJob } from './services/cleanupService.js';
+import { primeSettingsCache } from './services/adminSettingsService.js';
 import { logger } from './utils/logger.js';
 import { env } from './config/env.js';
 import { isRateLimitExempt } from './utils/rateLimitExempt.js';
@@ -514,6 +515,17 @@ const startServer = () => {
       error: error instanceof Error ? error.message : String(error),
     });
   });
+
+  // Warm the runtime-settings cache so the first room create/join/upload
+  // doesn't pay the initial read. Fire-and-forget; failures fall back to
+  // env defaults inside the service.
+  try {
+    primeSettingsCache();
+  } catch (error: any) {
+    logger.warn('Failed to prime admin settings cache', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   // Start cleanup job (non-blocking)
   try {

@@ -1,5 +1,5 @@
 import { Message } from '../types/index.js';
-export declare const createMessage: (roomCode: string, userId: string, nickname: string, content: string, type?: "text" | "file", fileMeta?: Message["fileMeta"], replyTo?: string, avatar?: string) => Promise<Message>;
+export declare const createMessage: (roomCode: string, userId: string, nickname: string, content: string, type?: "text" | "file", fileMeta?: Message["fileMeta"], replyTo?: string, avatar?: string, roomExpiresAt?: Date) => Promise<Message>;
 export declare const getRoomMessages: (roomCode: string, limit?: number) => Promise<Message[]>;
 export declare const getMessagesAfterId: (roomCode: string, lastMessageId?: string, limit?: number) => Promise<Message[]>;
 export declare const deleteMessage: (messageId: string, userId: string, roomOwnerId?: string) => Promise<boolean>;

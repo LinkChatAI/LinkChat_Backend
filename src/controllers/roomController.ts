@@ -17,6 +17,7 @@ import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
 import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
 import { getStorageLimitForPlan } from '../constants/roomStorage.js';
+import { getSettings } from '../services/adminSettingsService.js';
 
 const VALID_PLANS = ['free', 'premium', 'pro', 'enterprise'] as const;
 
@@ -37,6 +38,17 @@ export const createRoomHandler = async (req: UserAuthRequest, res: Response): Pr
   try {
     const body = createRoomSchema.parse(req.body);
     const requestedPlan = body.plan || 'free';
+
+    // Runtime kill switch (admin dashboard → Settings). Served from an
+    // in-process cache, so this is a memory read, not a DB round trip.
+    const settings = await getSettings();
+    if (!settings.roomCreationEnabled) {
+      res.status(503).json({
+        error: settings.maintenanceMessage || 'Room creation is temporarily disabled.',
+        code: 'ROOM_CREATION_DISABLED',
+      });
+      return;
+    }
 
     if (requestedPlan !== 'free') {
       if (!req.user) {

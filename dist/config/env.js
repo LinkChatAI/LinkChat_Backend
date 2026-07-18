@@ -72,6 +72,16 @@ const validateEnv = () => {
         GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
         GOOGLE_OAUTH_REDIRECT_URI: process.env.GOOGLE_OAUTH_REDIRECT_URI,
         USER_JWT_SECRET: process.env.USER_JWT_SECRET || process.env.JWT_SECRET,
+        // Defaults raised from the driver defaults (10/2) so a burst of concurrent
+        // message/join queries during a participant spike doesn't queue behind a
+        // small connection pool.
+        MONGO_MAX_POOL_SIZE: parseInt(process.env.MONGO_MAX_POOL_SIZE || '50', 10),
+        MONGO_MIN_POOL_SIZE: parseInt(process.env.MONGO_MIN_POOL_SIZE || '5', 10),
+        PERMANENT_ADMIN_EMAILS: process.env.PERMANENT_ADMIN_EMAILS,
+        // Hardcoded default so Ghost Mode works even if Cloud Run env config is
+        // incomplete (see prior GOOGLE_CLIENT_ID config-drift incident); still
+        // overridable via env var to add/remove Super Admins without a redeploy.
+        GHOST_MODE_ADMIN_EMAILS: process.env.GHOST_MODE_ADMIN_EMAILS || 'wordtheme44@gmail.com,m87.krishna@gmail.com',
     };
 };
 export const env = validateEnv();

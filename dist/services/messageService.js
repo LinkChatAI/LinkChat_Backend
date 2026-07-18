@@ -1,9 +1,15 @@
 import { MessageModel } from '../models/Message.js';
 import { RoomModel } from '../models/Room.js';
 import { v4 as uuidv4 } from 'uuid';
-export const createMessage = async (roomCode, userId, nickname, content, type = 'text', fileMeta, replyTo, avatar) => {
-    // Get room to set message expiry matching room expiry
-    const room = await RoomModel.findOne({ code: roomCode }).select('expiresAt').lean();
+import { recordMessageCreated } from './dailyStatsService.js';
+export const createMessage = async (roomCode, userId, nickname, content, type = 'text', fileMeta, replyTo, avatar, 
+// Callers that already fetched the room (e.g. sendMessage, which loads it to
+// check isLocked/slow-mode) should pass its expiresAt here to skip this
+// otherwise-redundant Mongo round trip on every message send. Falls back to
+// querying it when omitted (system messages, etc.).
+roomExpiresAt) => {
+    const expiresAt = roomExpiresAt ??
+        (await RoomModel.findOne({ code: roomCode }).select('expiresAt').lean())?.expiresAt;
     const message = new MessageModel({
         id: uuidv4(),
         roomCode,
@@ -17,9 +23,19 @@ export const createMessage = async (roomCode, userId, nickname, content, type = 
         reactions: {},
         isPinned: false,
         createdAt: new Date(),
-        expiresAt: room?.expiresAt, // TTL sync with room expiry
+        expiresAt, // TTL sync with room expiry
     });
     await message.save();
+    // Durable counters — Message documents are TTL-deleted when their room
+    // expires (see Message.ts's expireAfterSeconds index), so "Messages Sent
+    // Today" and the 30-day chart can't be answered correctly by counting live
+    // documents partway through the day. Fire-and-forget: never adds latency
+    // to the message-send path.
+    recordMessageCreated({
+        senderId: userId,
+        isFile: type === 'file',
+        fileSizeBytes: fileMeta?.size,
+    }).catch(() => { });
     return message.toObject();
 };
 export const getRoomMessages = async (roomCode, limit = 100) => {

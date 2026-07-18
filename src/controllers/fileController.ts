@@ -20,6 +20,7 @@ import {
 } from '../services/platformMetricsService.js';
 import { getStorageLimitForPlan } from '../constants/roomStorage.js';
 import { broadcastRoomStorageUpdate } from '../services/roomStorageBroadcast.js';
+import { getSettings } from '../services/adminSettingsService.js';
 
 const getUploadUrlSchema = z.object({
   fileName: z.string().min(1),
@@ -152,6 +153,25 @@ export const getUploadUrlHandler = async (req: Request, res: Response): Promise<
         });
         return;
       }
+    }
+
+    // Runtime upload rules (admin dashboard → Settings). In-process cached
+    // read; falls back to env.MAX_FILE_SIZE_BYTES / enabled when unset.
+    const settings = await getSettings();
+    if (!settings.fileUploadsEnabled) {
+      res.status(503).json({
+        error: 'UPLOADS_DISABLED',
+        message: settings.maintenanceMessage || 'File uploads are temporarily disabled.',
+      });
+      return;
+    }
+
+    const maxBytes = settings.maxFileSizeMb * 1024 * 1024;
+    if (fileSize > maxBytes) {
+      res.status(400).json({
+        error: `File size exceeds maximum of ${settings.maxFileSizeMb}MB`,
+      });
+      return;
     }
 
     const validation = validateFileUpload(fileName, fileType, fileSize);

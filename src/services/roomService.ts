@@ -6,6 +6,9 @@ import { generateUniqueSlug, isNumericCode, extractCodeFromSlug } from '../utils
 import { Room, CreateRoomRequest } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import { env } from '../config/env.js';
+import { recordRoomCreated, recordRoomVanished } from './dailyStatsService.js';
+import { incrementGlobalStat } from '../utils/globalStats.js';
+import { getSettingsSync } from './adminSettingsService.js';
 
 /**
  * `getRoomByCode` is called on every message send and every join — a burst of
@@ -68,7 +71,11 @@ export const createRoom = async (data?: CreateRoomRequest): Promise<Room> => {
   try {
     const code = await generateRoomCode();
     const token = generateToken(code);
-    const expiresAt = new Date(Date.now() + env.DEFAULT_ROOM_EXP_HOURS * 60 * 60 * 1000);
+    // Room lifetime is admin-configurable at runtime (dashboard → Settings).
+    // getSettingsSync reads the in-process cache and falls back to
+    // env.DEFAULT_ROOM_EXP_HOURS, so behaviour is unchanged when unset.
+    const expiryHours = getSettingsSync().defaultRoomExpiryHours;
+    const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
 
     let slug = generateUniqueSlug(data?.name || '', code);
     // Ensure slug uniqueness
@@ -94,6 +101,12 @@ export const createRoom = async (data?: CreateRoomRequest): Promise<Room> => {
     });
 
     await room.save();
+    // Durable counters — Room documents are TTL-deleted a short time after
+    // expiry (see Room.ts's expireAfterSeconds index), so "Total Rooms
+    // (Lifetime)" and "Rooms Created Today" can't be answered correctly by
+    // counting live documents. Fire-and-forget: never block room creation.
+    incrementGlobalStat('totalRoomsLifetime').catch(() => {});
+    recordRoomCreated().catch(() => {});
     logger.debug('Room created', { code, slug, expiresAt: expiresAt.toISOString() });
     return room.toObject();
   } catch (error: any) {
@@ -282,6 +295,7 @@ export const endRoom = async (code: string, userId: string): Promise<Room> => {
 
     logger.info('Room ended', { code, endedBy: userId });
     invalidateRoomCache(code);
+    recordRoomVanished('owner').catch(() => {});
     return room.toObject();
   } catch (error: any) {
     logger.error('Error ending room', { 

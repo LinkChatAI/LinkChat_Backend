@@ -415,3 +415,21 @@ export const getContactSubmissions = async (req: AdminRequest, res: Response): P
   }
 };
 
+/** DELETE /api/admin/contact/submissions/:id — permanently remove one submission. */
+export const deleteContactSubmission = async (req: AdminRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const result = await ContactSubmissionModel.findByIdAndDelete(id);
+    if (!result) {
+      res.status(404).json({ error: 'Submission not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    logger.error('Error deleting contact submission', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    res.status(500).json({ error: 'Failed to delete contact submission' });
+  }
+};
+

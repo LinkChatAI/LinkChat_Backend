@@ -10,6 +10,7 @@ import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
 import { createMessage } from './messageService.js';
 import { clearPendingDeletionTimer } from '../socket/handlers.js';
 import { v4 as uuidv4 } from 'uuid';
+import { recordRoomVanished } from './dailyStatsService.js';
 
 /**
  * Admin-controlled room vanish
@@ -90,6 +91,7 @@ export const adminVanishRoom = async (
     logger.warn(`Room ${roomCode} was already deleted`);
   } else {
     logger.info(`Admin-vanished room ${roomCode}`);
+    recordRoomVanished('admin').catch(() => {});
   }
 
   // 8. Clean up Redis if available

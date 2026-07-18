@@ -16,7 +16,7 @@ import {
   getDebugStats,
   getRoomDetailByCode,
 } from '../controllers/adminController.js';
-import { getContactSubmissions } from '../controllers/contactController.js';
+import { getContactSubmissions, deleteContactSubmission } from '../controllers/contactController.js';
 import {
   listBanners,
   createBanner,
@@ -29,6 +29,21 @@ import {
   clearDefaultBanner,
 } from '../controllers/sponsorBannerController.js';
 import { getUserLocations } from '../controllers/userLocationController.js';
+import {
+  getAnalytics,
+  getAuditLogHandler,
+  getAuditSummaryHandler,
+} from '../controllers/adminAnalyticsController.js';
+import {
+  getSettingsHandler,
+  updateSettingsHandler,
+  resetSettingsHandler,
+} from '../controllers/adminSettingsController.js';
+import {
+  inspectRoom,
+  moderateRoom,
+  searchRooms,
+} from '../controllers/adminModerationController.js';
 import { authenticateAdmin } from '../middleware/adminAuth.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
 import { auditAdminAction } from '../middleware/adminAudit.js';
@@ -157,6 +172,31 @@ router.post(
   vanishRoom
 );
 
+// Room search + inspector + moderation actions. These sit above the '/rooms/:code'
+// catch-all below for the same shadowing reason as /rooms/active and /rooms/locked:
+// '/rooms/search' would otherwise be swallowed as a room whose code is "search".
+router.get(
+  '/rooms/search',
+  rateLimiter('adminInsight'),
+  auditAdminAction('search_rooms'),
+  searchRooms
+);
+
+router.get(
+  '/rooms/:code/inspect',
+  rateLimiter('adminInsight'),
+  auditAdminAction('inspect_room', { code: ':code' }),
+  cacheAdminResponse({ ttl: 5 }),
+  inspectRoom
+);
+
+router.post(
+  '/rooms/:code/moderate',
+  rateLimiter('adminAction'),
+  auditAdminAction('moderate_room', { code: ':code' }),
+  moderateRoom
+);
+
 // Single room lookup by code (used by the Sponsor Banner Manager) — registered after the
 // literal /rooms/active and /rooms/locked routes above so it doesn't shadow them.
 router.get(
@@ -166,12 +206,73 @@ router.get(
   getRoomDetailByCode
 );
 
+// ---------------------------------------------------------------------------
+// Analytics, audit trail and runtime settings.
+//
+// All three read data the platform was already storing (UserVisit and
+// AdminAction carry no TTL) and add no new write path, so they cost nothing
+// beyond the query itself. Cache TTLs are set well above the dashboard's 15s
+// because none of this data changes minute to minute.
+// ---------------------------------------------------------------------------
+
+router.get(
+  '/analytics',
+  rateLimiter('adminDashboard'),
+  auditAdminAction('get_analytics'),
+  cacheAdminResponse({ ttl: 300 }), // 5 min — aggregations are the priciest queries here
+  getAnalytics
+);
+
+router.get(
+  '/audit/log',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_audit_log'),
+  cacheAdminResponse({ ttl: 15 }),
+  getAuditLogHandler
+);
+
+router.get(
+  '/audit/summary',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_audit_summary'),
+  cacheAdminResponse({ ttl: 60 }),
+  getAuditSummaryHandler
+);
+
+router.get(
+  '/settings',
+  rateLimiter('adminInsight'),
+  auditAdminAction('get_settings'),
+  getSettingsHandler
+);
+
+router.put(
+  '/settings',
+  rateLimiter('adminAction'),
+  auditAdminAction('update_settings'),
+  updateSettingsHandler
+);
+
+router.post(
+  '/settings/reset',
+  rateLimiter('adminAction'),
+  auditAdminAction('reset_settings'),
+  resetSettingsHandler
+);
+
 // Contact submissions endpoint (admin-only)
 router.get(
   '/contact/submissions',
   rateLimiter('adminInsight'),
   auditAdminAction('get_contact_submissions'),
   getContactSubmissions
+);
+
+router.delete(
+  '/contact/submissions/:id',
+  rateLimiter('adminAction'),
+  auditAdminAction('delete_contact_submission', { id: ':id' }),
+  deleteContactSubmission
 );
 
 // User geolocation (approximate, IP-derived) for the admin map view

@@ -20,8 +20,15 @@ import linkPreviewRoutes from './routes/linkPreviewRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import toolsRoutes from './routes/toolsRoutes.js';
+import planRoutes from './routes/planRoutes.js';
+import subscriptionRoutes from './routes/subscriptionRoutes.js';
+import creditRoutes from './routes/creditRoutes.js';
+import adminBillingRoutes from './routes/adminBillingRoutes.js';
+import adminUserRoutes from './routes/adminUserRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { authenticateAdmin } from './middleware/adminAuth.js';
 import { startCleanupJob } from './services/cleanupService.js';
+import { primeSettingsCache } from './services/adminSettingsService.js';
 import { logger } from './utils/logger.js';
 import { env } from './config/env.js';
 import { isRateLimitExempt } from './utils/rateLimitExempt.js';
@@ -62,7 +69,11 @@ const io = new Server(httpServer, {
         methods: ['GET', 'POST'],
         credentials: true,
     },
-    pingTimeout: 90000,
+    // Mobile browsers freeze background tabs, so client pings stop flowing.
+    // pingInterval 25s + pingTimeout 120s keeps the raw connection alive for
+    // ~2m25s of background time before the server drops it, and
+    // connectionStateRecovery below covers another 2 minutes beyond that.
+    pingTimeout: 120000,
     pingInterval: 25000,
     // Server accepts both transports. The production client uses websocket-only
     // (see frontend/src/services/socket.ts) to avoid the HTTP long-polling
@@ -71,6 +82,11 @@ const io = new Server(httpServer, {
     // polling as a fallback against a single backend instance.
     transports: ['websocket', 'polling'],
     maxHttpBufferSize: 15 * 1024 * 1024, // 15MB to accommodate 10MB files after base64 encoding (~33% overhead)
+    // Per-message compression costs CPU per frame; under a large room's broadcast
+    // fan-out (one 'newMessage' frame re-serialized/sent to every socket) that
+    // adds up fast. Payloads here are small JSON, so compression rarely pays for
+    // itself — trade a little bandwidth for meaningfully less CPU under load.
+    perMessageDeflate: false,
     // Restore session state (rooms + missed packets) after a brief disconnect
     // instead of forcing a full rejoin. Smooths over mobile tab freezes and
     // momentary network blips. Works across instances via the Redis adapter.
@@ -156,14 +172,30 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const localUploadsDir = path.join(__dirname, '../uploads');
-app.use('/uploads', express.static(localUploadsDir));
-app.use('/api/uploads', express.static(localUploadsDir));
+// Uploaded file paths embed a fresh UUID per upload, so they're effectively immutable —
+// safe to cache aggressively client-side.
+const uploadsStaticOptions = { maxAge: '7d', immutable: true };
+app.use('/uploads', express.static(localUploadsDir, uploadsStaticOptions));
+app.use('/api/uploads', express.static(localUploadsDir, uploadsStaticOptions));
 // Request timeout middleware
 app.use((req, res, next) => {
     req.setTimeout(30000, () => {
         res.status(408).json({ error: 'Request timeout' });
     });
     next();
+});
+// Prometheus scrape endpoint — same auth as /api/admin/*. A scrape config can
+// use `authorization: { type: Bearer, credentials: <ADMIN_SECRET> }` since
+// authenticateAdmin also accepts a Bearer token.
+app.get('/metrics', authenticateAdmin, async (req, res) => {
+    try {
+        const { getMetricsText, getMetricsContentType } = await import('./services/metricsService.js');
+        res.set('Content-Type', getMetricsContentType());
+        res.end(await getMetricsText());
+    }
+    catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to collect metrics' });
+    }
 });
 // Health check endpoint
 app.get('/healthz', (req, res) => {
@@ -187,6 +219,10 @@ app.get('/ready', async (req, res) => {
         res.status(allHealthy ? 200 : 503).json({
             status: allHealthy ? 'ready' : 'not ready',
             checks,
+            // Whether THIS instance can broadcast across other Cloud Run instances —
+            // 'memory' here in production means this instance is isolated even if
+            // `checks.redis` is true (e.g. app Redis client up, adapter still retrying).
+            socketIoAdapter: getSocketIoAdapterStatus(),
             timestamp: new Date().toISOString(),
         });
     }
@@ -198,8 +234,8 @@ app.get('/ready', async (req, res) => {
         });
     }
 });
-// Database connection status endpoint (for debugging)
-app.get('/api/admin/db-status', async (req, res) => {
+// Database connection status endpoint (for debugging, admin-only)
+app.get('/api/admin/db-status', authenticateAdmin, async (req, res) => {
     try {
         const mongoose = await import('mongoose');
         const { env } = await import('./config/env.js');
@@ -223,8 +259,10 @@ app.get('/api/admin/db-status', async (req, res) => {
         });
     }
 });
-// Manual database reconnection endpoint (for debugging)
-app.post('/api/admin/reconnect-db', async (req, res) => {
+// Manual database reconnection endpoint (for debugging, admin-only).
+// Unauthenticated, this let anyone force a disconnect/reconnect cycle
+// (5 retries with delays) — a trivial DoS against the connection pool.
+app.post('/api/admin/reconnect-db', authenticateAdmin, async (req, res) => {
     try {
         const { connectDatabase } = await import('./config/database.js');
         const mongoose = await import('mongoose');
@@ -262,6 +300,14 @@ app.use('/api/rooms', roomRoutes);
 app.use('/api/nickname', nicknameRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/admin', adminRoutes);
+// Mounted OUTSIDE '/api/admin' — that prefix is fully claimed by the legacy shared-secret
+// adminRoutes router above (its router.use(authenticateAdmin) intercepts every sub-path
+// unconditionally), so nesting these under /api/admin/* would make them unreachable.
+app.use('/api/billing-admin', adminBillingRoutes);
+app.use('/api/rbac-users', adminUserRoutes);
+app.use('/api/plans', planRoutes);
+app.use('/api/subscriptions', subscriptionRoutes);
+app.use('/api/credits', creditRoutes);
 app.use('/api/files', fileRoutes);
 // Link preview (OG cards) with rate limit
 const linkPreviewLimiter = rateLimit({
@@ -294,26 +340,15 @@ io.on('connection', async (socket) => {
 });
 let cleanupJobInterval = null;
 let autoVanishInterval = null;
+let subscriptionExpiryInterval = null;
+let metricsLogInterval = null;
 let adapterPubClient = null;
 let adapterSubClient = null;
-// Wire the Socket.IO Redis adapter so broadcasts (newMessage, etc.) reach
-// clients connected to OTHER Cloud Run instances. Without this, a message sent
-// on instance A is never delivered to a user on instance B. Falls back silently
-// to the in-memory adapter (single-instance) when Redis is unavailable.
-const setupRedisAdapter = async () => {
-    // The Redis adapter only matters when running multiple instances (production
-    // on Cloud Run). Local dev is a single instance, so skip it entirely and
-    // avoid the startup connection attempt / log noise. Set REDIS_ADAPTER=1 to
-    // force it on in development (e.g. to test multi-instance locally).
-    const wantAdapter = process.env.NODE_ENV === 'production' || process.env.REDIS_ADAPTER === '1';
-    if (!wantAdapter) {
-        logger.info('Socket.IO using in-memory adapter (development, single instance)');
-        return;
-    }
-    if (!env.REDIS_URL) {
-        logger.warn('REDIS_URL not set — Socket.IO using in-memory adapter (safe only for a single instance)');
-        return;
-    }
+let socketIoAdapterStatus = 'memory';
+export const getSocketIoAdapterStatus = () => socketIoAdapterStatus;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** One connect-and-wire attempt. Returns true if the Redis adapter is now active. */
+const tryConnectRedisAdapter = async () => {
     try {
         const { createAdapter } = await import('@socket.io/redis-adapter');
         const { default: Redis } = await import('ioredis');
@@ -345,13 +380,12 @@ const setupRedisAdapter = async () => {
         // Verify both clients can actually connect before wiring the adapter.
         await Promise.all([adapterPubClient.connect(), adapterSubClient.connect()]);
         io.adapter(createAdapter(adapterPubClient, adapterSubClient));
+        socketIoAdapterStatus = 'redis';
         logger.info('Socket.IO Redis adapter enabled (cross-instance broadcasting active)');
+        return true;
     }
     catch (error) {
-        // Redis unreachable — tear down the clients so they stop retrying, and run
-        // with the in-memory adapter. Fine for a single instance (local dev);
-        // multi-instance production must provide a reachable REDIS_URL.
-        logger.warn('Redis unreachable — Socket.IO using in-memory adapter (safe only for a single instance)', {
+        logger.warn('Redis adapter connect attempt failed', {
             error: error instanceof Error ? error.message : String(error),
         });
         try {
@@ -366,7 +400,37 @@ const setupRedisAdapter = async () => {
         catch { /* ignore */ }
         adapterPubClient = null;
         adapterSubClient = null;
+        return false;
     }
+};
+// Wire the Socket.IO Redis adapter so broadcasts (newMessage, etc.) reach
+// clients connected to OTHER Cloud Run instances. Without this, a message sent
+// on instance A is never delivered to a user on instance B. Retries a few
+// times with backoff — a transient Redis cold-start blip at boot shouldn't
+// permanently strand an instance on the in-memory adapter for its whole
+// lifetime — then falls back to in-memory (safe only for a single instance).
+const setupRedisAdapter = async () => {
+    // The Redis adapter only matters when running multiple instances (production
+    // on Cloud Run). Local dev is a single instance, so skip it entirely and
+    // avoid the startup connection attempt / log noise. Set REDIS_ADAPTER=1 to
+    // force it on in development (e.g. to test multi-instance locally).
+    const wantAdapter = process.env.NODE_ENV === 'production' || process.env.REDIS_ADAPTER === '1';
+    if (!wantAdapter) {
+        logger.info('Socket.IO using in-memory adapter (development, single instance)');
+        return;
+    }
+    if (!env.REDIS_URL) {
+        logger.warn('REDIS_URL not set — Socket.IO using in-memory adapter (safe only for a single instance)');
+        return;
+    }
+    const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+        if (await tryConnectRedisAdapter())
+            return;
+        if (attempt < RETRY_DELAYS_MS.length)
+            await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+    logger.warn('Redis unreachable after retries — Socket.IO using in-memory adapter (safe only for a single instance)');
 };
 const startServer = () => {
     // Start server immediately - don't wait for anything
@@ -409,6 +473,17 @@ const startServer = () => {
             error: error instanceof Error ? error.message : String(error),
         });
     });
+    // Warm the runtime-settings cache so the first room create/join/upload
+    // doesn't pay the initial read. Fire-and-forget; failures fall back to
+    // env defaults inside the service.
+    try {
+        primeSettingsCache();
+    }
+    catch (error) {
+        logger.warn('Failed to prime admin settings cache', {
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
     // Start cleanup job (non-blocking)
     try {
         cleanupJobInterval = startCleanupJob();
@@ -433,6 +508,33 @@ const startServer = () => {
             // Don't exit - server can still run
         }
     })();
+    // Start subscription-expiry worker (non-blocking)
+    (async () => {
+        try {
+            const { startSubscriptionExpiryWorker } = await import('./services/subscriptionExpiryService.js');
+            subscriptionExpiryInterval = startSubscriptionExpiryWorker();
+            logger.info('Subscription expiry worker started');
+        }
+        catch (error) {
+            logger.error('Failed to start subscription expiry worker', {
+                error: error instanceof Error ? error.message : String(error)
+            });
+            // Don't exit - server can still run
+        }
+    })();
+    // Periodic metrics summary in Cloud Logging, independent of whether a
+    // Prometheus scraper is configured against /metrics.
+    (async () => {
+        try {
+            const { startMetricsLogging } = await import('./services/metricsService.js');
+            metricsLogInterval = startMetricsLogging();
+        }
+        catch (error) {
+            logger.error('Failed to start metrics logging', {
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    })();
 };
 // Graceful shutdown
 const shutdown = async (signal) => {
@@ -448,6 +550,12 @@ const shutdown = async (signal) => {
     }
     if (autoVanishInterval) {
         clearInterval(autoVanishInterval);
+    }
+    if (subscriptionExpiryInterval) {
+        clearInterval(subscriptionExpiryInterval);
+    }
+    if (metricsLogInterval) {
+        clearInterval(metricsLogInterval);
     }
     try {
         await closeRedis();

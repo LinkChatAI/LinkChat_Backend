@@ -47,14 +47,16 @@ export const cleanupExpiredRooms = async () => {
         if (redis && isRedisAvailable()) {
             try {
                 for (const code of roomCodes) {
-                    await redis.del(`room:${code}:users`);
-                    const keys = await redis.keys(`user:*`);
-                    for (const key of keys) {
-                        const userData = await redis.hget(key, 'roomCode');
-                        if (userData === code) {
-                            await redis.del(key);
+                    // Use the room's member set as a reverse index instead of scanning
+                    // the whole keyspace with KEYS (O(all users) and blocks Redis).
+                    const userIds = await redis.smembers(`room:${code}:users`);
+                    for (const uid of userIds) {
+                        const userRoomCode = await redis.hget(`user:${uid}`, 'roomCode');
+                        if (userRoomCode === code) {
+                            await redis.del(`user:${uid}`);
                         }
                     }
+                    await redis.del(`room:${code}:users`);
                 }
             }
             catch (error) {

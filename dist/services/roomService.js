@@ -4,7 +4,25 @@ import { generateRoomCode } from '../utils/roomCode.js';
 import { generateToken, verifyToken } from '../utils/jwt.js';
 import { generateUniqueSlug, isNumericCode, extractCodeFromSlug } from '../utils/slug.js';
 import { logger } from '../utils/logger.js';
-import { env } from '../config/env.js';
+import { recordRoomCreated, recordRoomVanished } from './dailyStatsService.js';
+import { incrementGlobalStat } from '../utils/globalStats.js';
+import { getSettingsSync } from './adminSettingsService.js';
+/**
+ * `getRoomByCode` is called on every message send and every join — a burst of
+ * either hits Mongo once per call with no caching. Room settings (lock state,
+ * slow mode, ownership) change rarely, so a short-TTL cache cuts nearly all of
+ * that read traffic. Every mutator below invalidates its room's entry
+ * immediately; the TTL is just a safety net for any update path that doesn't
+ * go through this file.
+ */
+const ROOM_CACHE_TTL_MS = 4000;
+const roomCache = new Map();
+const cacheRoom = (code, room) => {
+    roomCache.set(code, { room, expiresAt: Date.now() + ROOM_CACHE_TTL_MS });
+};
+const invalidateRoomCache = (code) => {
+    roomCache.delete(code);
+};
 /**
  * Wait for database connection to be ready
  * Retries up to 10 times with 500ms delay between attempts (max 5 seconds wait)
@@ -46,7 +64,11 @@ export const createRoom = async (data) => {
     try {
         const code = await generateRoomCode();
         const token = generateToken(code);
-        const expiresAt = new Date(Date.now() + env.DEFAULT_ROOM_EXP_HOURS * 60 * 60 * 1000);
+        // Room lifetime is admin-configurable at runtime (dashboard → Settings).
+        // getSettingsSync reads the in-process cache and falls back to
+        // env.DEFAULT_ROOM_EXP_HOURS, so behaviour is unchanged when unset.
+        const expiryHours = getSettingsSync().defaultRoomExpiryHours;
+        const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
         let slug = generateUniqueSlug(data?.name || '', code);
         // Ensure slug uniqueness
         let existing = await RoomModel.findOne({ slug });
@@ -69,6 +91,12 @@ export const createRoom = async (data) => {
             ownerUserId: data?.ownerUserId,
         });
         await room.save();
+        // Durable counters — Room documents are TTL-deleted a short time after
+        // expiry (see Room.ts's expireAfterSeconds index), so "Total Rooms
+        // (Lifetime)" and "Rooms Created Today" can't be answered correctly by
+        // counting live documents. Fire-and-forget: never block room creation.
+        incrementGlobalStat('totalRoomsLifetime').catch(() => { });
+        recordRoomCreated().catch(() => { });
         logger.debug('Room created', { code, slug, expiresAt: expiresAt.toISOString() });
         return room.toObject();
     }
@@ -104,6 +132,10 @@ export const createRoom = async (data) => {
     }
 };
 export const getRoomByCode = async (code) => {
+    const cached = roomCache.get(code);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.room;
+    }
     // Wait for database connection if not ready
     if (mongoose.connection.readyState !== 1) {
         const isReady = await waitForDatabase();
@@ -116,7 +148,9 @@ export const getRoomByCode = async (code) => {
         const room = await RoomModel.findOne({ code });
         if (!room)
             return null;
-        return room.toObject();
+        const result = room.toObject();
+        cacheRoom(code, result);
+        return result;
     }
     catch (error) {
         logger.error('Error getting room by code', {
@@ -236,6 +270,8 @@ export const endRoom = async (code, userId) => {
             throw new Error('Room not found');
         }
         logger.info('Room ended', { code, endedBy: userId });
+        invalidateRoomCache(code);
+        recordRoomVanished('owner').catch(() => { });
         return room.toObject();
     }
     catch (error) {
@@ -257,6 +293,7 @@ export const removeParticipant = async (code, userId) => {
             throw new Error('Room not found');
         }
         logger.info('Participant removed from room', { code, userId });
+        invalidateRoomCache(code);
         return room.toObject();
     }
     catch (error) {
@@ -277,6 +314,7 @@ export const unlockRoom = async (code) => {
         throw new Error('Room not found');
     }
     logger.info('Room unlocked', { code });
+    invalidateRoomCache(code);
     return room.toObject();
 };
 export const transferRoomOwnership = async (code, newOwnerId) => {
@@ -293,6 +331,7 @@ export const transferRoomOwnership = async (code, newOwnerId) => {
         throw new Error('Room not found');
     }
     logger.info('Room ownership transferred', { code, newOwnerId });
+    invalidateRoomCache(code);
     return room.toObject();
 };
 export const addRoomCoHost = async (code, userId) => {
@@ -303,6 +342,7 @@ export const addRoomCoHost = async (code, userId) => {
     if (!room) {
         throw new Error('Room not found');
     }
+    invalidateRoomCache(code);
     return room.toObject();
 };
 export const removeRoomCoHost = async (code, userId) => {
@@ -313,6 +353,7 @@ export const removeRoomCoHost = async (code, userId) => {
     if (!room) {
         throw new Error('Room not found');
     }
+    invalidateRoomCache(code);
     return room.toObject();
 };
 export const setRoomSlowMode = async (code, messagesPerMinute) => {
@@ -324,6 +365,7 @@ export const setRoomSlowMode = async (code, messagesPerMinute) => {
     if (!room) {
         throw new Error('Room not found');
     }
+    invalidateRoomCache(code);
     return room.toObject();
 };
 export const setParticipantsCanSend = async (code, canSend) => {
@@ -334,6 +376,7 @@ export const setParticipantsCanSend = async (code, canSend) => {
     if (!room) {
         throw new Error('Room not found');
     }
+    invalidateRoomCache(code);
     return room.toObject();
 };
 export const setJoinLocked = async (code, locked) => {
@@ -344,6 +387,7 @@ export const setJoinLocked = async (code, locked) => {
     if (!room) {
         throw new Error('Room not found');
     }
+    invalidateRoomCache(code);
     return room.toObject();
 };
 export const lockRoom = async (code) => {
@@ -360,6 +404,7 @@ export const lockRoom = async (code) => {
             throw new Error('Room not found');
         }
         logger.info('Room locked', { code, lockedAt: room.lockedAt });
+        invalidateRoomCache(code);
         return room.toObject();
     }
     catch (error) {

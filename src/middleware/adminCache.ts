@@ -74,23 +74,36 @@ export const cacheAdminResponse = (options: CacheOptions = {}) => {
   };
 };
 
-// Invalidate cache for specific patterns
-export const invalidateAdminCache = async (pattern: string): Promise<void> => {
+// The dashboard-affecting cache keys, exactly as cacheAdminResponse's
+// default keyGenerator produces them (`admin:cache:${req.path}:${query}`,
+// where req.path is router-relative — always starts with '/' since Express
+// strips the /api/admin mount prefix — and query is '{}' since none of
+// these three routes accept query params today). Kept as an exact list and
+// `redis.del()`'d directly rather than pattern-matched with `KEYS`/`SCAN`:
+// the previous glob-based `invalidateAdminCache(pattern)` searched
+// `admin:cache:${pattern}*`, which could never match a real key like
+// `admin:cache:/insights/dashboard:{}` (the pattern expected `i` right
+// where the real key has `/`) — it had never actually invalidated anything;
+// the cache only ever expired via TTL. If any of these routes gain a query
+// parameter in the future, this list needs updating to match.
+const DASHBOARD_CACHE_KEYS = [
+  'admin:cache:/insights/dashboard:{}',
+  'admin:cache:/rooms/active:{}',
+  'admin:cache:/rooms/locked:{}',
+] as const;
+
+export const invalidateDashboardCache = async (): Promise<void> => {
   const redis = getRedis();
   if (!redis || !isRedisAvailable()) {
     return;
   }
 
   try {
-    const keys = await redis.keys(`admin:cache:${pattern}*`);
-    if (keys.length > 0) {
-      await redis.del(...keys);
-      logger.debug(`Invalidated ${keys.length} cache keys for pattern: ${pattern}`);
-    }
+    await redis.del(...DASHBOARD_CACHE_KEYS);
+    logger.debug('Invalidated admin dashboard cache keys');
   } catch (error: any) {
-    logger.error('Failed to invalidate admin cache', {
+    logger.error('Failed to invalidate admin dashboard cache', {
       error: error instanceof Error ? error.message : String(error),
-      pattern,
     });
   }
 };

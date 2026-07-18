@@ -3,15 +3,15 @@ import mongoose from 'mongoose';
 import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
 import { UserVisitModel } from '../models/UserVisit.js';
-import { GlobalStatsModel } from '../models/GlobalStats.js';
 import { logger } from '../utils/logger.js';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { AdminRequest } from '../middleware/adminAuth.js';
-import { invalidateAdminCache } from '../middleware/adminCache.js';
+import { invalidateDashboardCache } from '../middleware/adminCache.js';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { adminVanishRoom } from '../services/adminRoomService.js';
-
-const getRedis = () => getRedisClient();
+import { getOrCreateGlobalStat, getSelfHealingGlobalStat } from '../utils/globalStats.js';
+import { getDashboardInsightsCached } from '../services/adminInsightsService.js';
+import { getLiveUserCountsForRooms } from '../services/roomPresenceService.js';
 
 /**
  * Get start of day in server timezone (not UTC)
@@ -23,40 +23,13 @@ const getStartOfDay = (): Date => {
   return startOfDay;
 };
 
-/**
- * Get or create global stat counter (for persistent visit tracking)
- */
-const getOrCreateGlobalStat = async (key: string, defaultValue: number = 0): Promise<number> => {
-  try {
-    let stat = await GlobalStatsModel.findOne({ key });
-    if (!stat) {
-      stat = await GlobalStatsModel.create({ key, value: defaultValue });
-    }
-    return stat.value;
-  } catch (error: any) {
-    logger.warn(`Failed to get global stat ${key}`, { error: error instanceof Error ? error.message : String(error) });
-    return defaultValue;
-  }
-};
-
-/**
- * Increment global stat counter atomically
- */
-const incrementGlobalStat = async (key: string, increment: number = 1): Promise<void> => {
-  try {
-    await GlobalStatsModel.findOneAndUpdate(
-      { key },
-      { $inc: { value: increment }, $set: { lastUpdated: new Date() } },
-      { upsert: true, new: true }
-    );
-  } catch (error: any) {
-    logger.warn(`Failed to increment global stat ${key}`, { error: error instanceof Error ? error.message : String(error) });
-  }
-};
-
 export const getTotalRooms = async (req: AdminRequest, res: Response): Promise<void> => {
   try {
-    const count = await RoomModel.countDocuments({});
+    // Room documents are TTL-deleted shortly after expiry (Room.ts's
+    // expireAfterSeconds index), so a live count only ever reflects rooms
+    // that haven't been reaped yet — not a true lifetime total. Durable
+    // counter, self-healed from the current live count on first read.
+    const count = await getSelfHealingGlobalStat('totalRoomsLifetime', () => RoomModel.estimatedDocumentCount());
     res.json({ totalRooms: count });
   } catch (error: any) {
     logger.error('Error getting total rooms', { error: error instanceof Error ? error.message : String(error) });
@@ -96,10 +69,10 @@ export const getAutoVanishRooms = async (req: AdminRequest, res: Response): Prom
   try {
     const now = new Date();
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    
+
     const count = await RoomModel.countDocuments({
       isLocked: true,
-      lockedAt: { 
+      lockedAt: {
         $exists: true,
         $gte: oneDayAgo,
         $lte: now
@@ -121,7 +94,7 @@ export const getVanishedToday = async (req: AdminRequest, res: Response): Promis
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(startOfDay);
     endOfDay.setHours(23, 59, 59, 999);
-    
+
     const result = await RoomModel.aggregate([
       {
         $match: {
@@ -135,7 +108,7 @@ export const getVanishedToday = async (req: AdminRequest, res: Response): Promis
         $count: 'count'
       }
     ]);
-    
+
     const count = result[0]?.count || 0;
     res.json({ vanishedToday: count });
   } catch (error: any) {
@@ -147,24 +120,36 @@ export const getVanishedToday = async (req: AdminRequest, res: Response): Promis
 export const getUsersOnline = async (req: AdminRequest, res: Response): Promise<void> => {
   try {
     const redis = getRedisClient();
-    
+
     if (!redis || !isRedisAvailable()) {
-      res.json({ 
+      res.json({
         usersOnline: 0,
         note: 'Redis not available. Online user count requires Redis for real-time tracking.'
       });
       return;
     }
-    
-    // Get all unique user IDs from all room:code:users sets
-    const keys = await redis.keys('room:*:users');
-    const userIds = new Set<string>();
-    
-    for (const key of keys) {
-      const roomUsers = await redis.smembers(key);
-      roomUsers.forEach((userId: string) => userIds.add(userId));
+
+    // Non-blocking cursor scan (KEYS blocks Redis's single-threaded event
+    // loop for every other caller — including the join/leave hot path —
+    // for the duration of the scan) + a pipelined SMEMBERS batch instead of
+    // one round trip per room. Same unique-user-dedup semantics as before.
+    const keys: string[] = [];
+    const stream = redis.scanStream({ match: 'room:*:users', count: 100 });
+    for await (const chunk of stream as AsyncIterable<string[]>) {
+      keys.push(...chunk);
     }
-    
+
+    const userIds = new Set<string>();
+    if (keys.length > 0) {
+      const pipeline = redis.pipeline();
+      keys.forEach((key: string) => pipeline.smembers(key));
+      const results = await pipeline.exec();
+      results?.forEach((result: [Error | null, unknown]) => {
+        const [, members] = result;
+        (members as string[] | undefined)?.forEach((userId: string) => userIds.add(userId));
+      });
+    }
+
     res.json({ usersOnline: userIds.size });
   } catch (error: any) {
     logger.error('Error getting users online', { error: error instanceof Error ? error.message : String(error) });
@@ -174,19 +159,17 @@ export const getUsersOnline = async (req: AdminRequest, res: Response): Promise<
 
 export const getUsersInLockedRooms = async (req: AdminRequest, res: Response): Promise<void> => {
   try {
+    // Room.participants is never populated on join (only ever $pull'd on
+    // leave) — was always ~0 here. Use live per-room counts instead.
     const lockedRooms = await RoomModel.find({
       isLocked: true,
       isEnded: { $ne: true }
-    }).select('code participants');
-    
-    const userIds = new Set<string>();
-    lockedRooms.forEach(room => {
-      if (room.participants && Array.isArray(room.participants)) {
-        room.participants.forEach((userId: string) => userIds.add(userId));
-      }
-    });
-    
-    res.json({ usersInLockedRooms: userIds.size });
+    }).select('code').lean().exec();
+
+    const counts = await getLiveUserCountsForRooms(getIoInstance(), lockedRooms.map((r: any) => r.code));
+    const total = Array.from(counts.values()).reduce((sum, c) => sum + c, 0);
+
+    res.json({ usersInLockedRooms: total });
   } catch (error: any) {
     logger.error('Error getting users in locked rooms', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to get users in locked rooms' });
@@ -197,7 +180,7 @@ export const getRoomsExpiringInNextHour = async (req: AdminRequest, res: Respons
   try {
     const now = new Date();
     const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000);
-    
+
     const count = await RoomModel.countDocuments({
       expiresAt: {
         $gte: now,
@@ -205,7 +188,7 @@ export const getRoomsExpiringInNextHour = async (req: AdminRequest, res: Respons
       },
       isEnded: { $ne: true }
     });
-    
+
     res.json({ roomsExpiringInNextHour: count });
   } catch (error: any) {
     logger.error('Error getting rooms expiring in next hour', { error: error instanceof Error ? error.message : String(error) });
@@ -220,7 +203,7 @@ export const getRoomsExpiringToday = async (req: AdminRequest, res: Response): P
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(now);
     endOfDay.setHours(23, 59, 59, 999);
-    
+
     const count = await RoomModel.countDocuments({
       expiresAt: {
         $gte: startOfDay,
@@ -228,7 +211,7 @@ export const getRoomsExpiringToday = async (req: AdminRequest, res: Response): P
       },
       isEnded: { $ne: true }
     });
-    
+
     res.json({ roomsExpiringToday: count });
   } catch (error: any) {
     logger.error('Error getting rooms expiring today', { error: error instanceof Error ? error.message : String(error) });
@@ -236,960 +219,27 @@ export const getRoomsExpiringToday = async (req: AdminRequest, res: Response): P
   }
 };
 
-// Helper to get day-wise data for last 30 days
-const getDayWiseData = (startDate: Date, endDate: Date, data: Array<{ date: Date }>) => {
-  const daysMap = new Map<string, number>();
-  const current = new Date(startDate);
-  
-  while (current <= endDate) {
-    const dayKey = current.toISOString().split('T')[0];
-    daysMap.set(dayKey, 0);
-    current.setDate(current.getDate() + 1);
-  }
-  
-  data.forEach(item => {
-    const dayKey = new Date(item.date).toISOString().split('T')[0];
-    const count = daysMap.get(dayKey) || 0;
-    daysMap.set(dayKey, count + 1);
-  });
-  
-  return Array.from(daysMap.entries()).map(([date, count]) => ({ date, count }));
-};
-
+/**
+ * GET /insights/dashboard — thin wrapper around the shared computation in
+ * adminInsightsService.ts, which is also used by the admin Socket.IO push
+ * (adminHandlers.ts). Previously this ~950-line function and a near-full
+ * duplicate in adminHandlers.ts computed the same bundle independently via
+ * two separate caches; they drifted (see plan doc "Bug D"). See
+ * adminInsightsService.ts for the actual query logic and every correctness
+ * fix (Bugs A/B/E/F) applied there.
+ */
 export const getDashboardInsights = async (req: AdminRequest, res: Response): Promise<void> => {
   try {
-    // Check database connection
     if (mongoose.connection.readyState !== 1) {
       logger.warn('Database not connected when getting dashboard insights');
       res.status(503).json({ error: 'Database not connected' });
       return;
     }
 
-    // Use server timezone (not UTC) for "Today" definition
-    const now = new Date();
-    const startOfDay = getStartOfDay();
-    const endOfDay = new Date(startOfDay);
-    endOfDay.setHours(23, 59, 59, 999);
-    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000);
-    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    // Overview & Rooms metrics
-    const [
-      totalRooms,
-      activeRooms,
-      lockedRooms,
-      autoVanishRooms,
-      vanishedTodayResult,
-      roomsExpiringNextHour,
-      roomsExpiringToday,
-      roomsCreatedToday,
-      roomsCreatedLast30Days,
-      roomsEligibleToVanishNow,
-      vanishedByAdminVsAuto,
-      averageRoomLifetime
-    ] = await Promise.all([
-      // Total Rooms (Lifetime): Use estimatedDocumentCount for performance
-      RoomModel.estimatedDocumentCount().catch(() => RoomModel.countDocuments({})),
-      // Active Rooms: expiresAt > now
-      RoomModel.countDocuments({
-        expiresAt: { $gt: now },
-        isEnded: { $ne: true },
-        isLocked: { $ne: true }
-      }),
-      // Locked Rooms: isLocked = true
-      RoomModel.countDocuments({
-        isLocked: true,
-        isEnded: { $ne: true }
-      }),
-      // Auto-Vanish Rooms (Pending < 24h): expiresAt between now and tomorrow
-      RoomModel.countDocuments({
-        expiresAt: { $gt: now, $lt: tomorrow },
-        isLocked: true,
-        isEnded: { $ne: true }
-      }),
-      RoomModel.aggregate([
-        {
-          $match: {
-            $or: [
-              { isEnded: true, endedAt: { $gte: startOfDay, $lte: endOfDay } },
-              { expiresAt: { $gte: startOfDay, $lte: endOfDay } }
-            ]
-          }
-        },
-        { $count: 'count' }
-      ]).allowDiskUse(true),
-      RoomModel.countDocuments({
-        expiresAt: {
-          $gte: now,
-          $lte: oneHourFromNow
-        },
-        isEnded: { $ne: true }
-      }),
-      RoomModel.countDocuments({
-        expiresAt: {
-          $gte: startOfDay,
-          $lte: endOfDay
-        },
-        isEnded: { $ne: true }
-      }),
-      RoomModel.countDocuments({
-        createdAt: { $gte: startOfDay, $lte: endOfDay }
-      }),
-      RoomModel.find({
-        createdAt: { $gte: thirtyDaysAgo, $lte: now }
-      }).select('createdAt').lean().exec(),
-      RoomModel.countDocuments({
-        isLocked: true,
-        lockedAt: {
-          $exists: true,
-          $lt: oneDayAgo
-        },
-        isEnded: { $ne: true },
-        expiresAt: { $gt: now }
-      }),
-      RoomModel.aggregate([
-        {
-          $match: {
-            isEnded: true,
-            endedAt: { $gte: startOfDay, $lte: endOfDay }
-          }
-        },
-        {
-          $group: {
-            _id: '$endedBy',
-            count: { $sum: 1 }
-          }
-        }
-      ]).allowDiskUse(true),
-      RoomModel.aggregate([
-        {
-          $match: {
-            isEnded: true,
-            endedAt: { $gte: thirtyDaysAgo }
-          }
-        },
-        {
-          $project: {
-            lifetime: {
-              $subtract: ['$endedAt', '$createdAt']
-            }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            avgLifetime: { $avg: '$lifetime' }
-          }
-        }
-      ]).allowDiskUse(true)
-    ]);
-
-    // Messages metrics - Using Aggregation Pipelines
-    const [
-      messagesSentToday,
-      messagesLast30Days,
-      peakMessagingTimeToday
-    ] = await Promise.all([
-      // Messages Sent Today
-      MessageModel.countDocuments({
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-        deletedByAdmin: { $ne: true }
-      }),
-      MessageModel.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: thirtyDaysAgo, $lte: now },
-            deletedByAdmin: { $ne: true }
-          }
-        },
-        {
-          $group: {
-            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-            count: { $sum: 1 }
-          }
-        },
-        {
-          $sort: { _id: 1 }
-        }
-      ]).allowDiskUse(true),
-      MessageModel.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-            deletedByAdmin: { $ne: true }
-          }
-        },
-        {
-          $group: {
-            _id: { $hour: '$createdAt' },
-            count: { $sum: 1 }
-          }
-        },
-        { $sort: { count: -1 } },
-        { $limit: 1 }
-      ]).allowDiskUse(true)
-    ]);
-
-    // Files metrics - Using Aggregation Pipelines
-    const [
-      filesSharedToday,
-      storageUsedToday,
-      fileStats
-    ] = await Promise.all([
-      // Files Shared Today: type = 'file'
-      MessageModel.countDocuments({
-        type: 'file',
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-        deletedByAdmin: { $ne: true }
-      }),
-      // Storage Used Today: Aggregate sum of fileMeta.size
-      MessageModel.aggregate([
-        {
-          $match: {
-            type: 'file',
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-            deletedByAdmin: { $ne: true },
-            'fileMeta.size': { $exists: true, $gt: 0 }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalSize: { $sum: '$fileMeta.size' }
-          }
-        }
-      ]).allowDiskUse(true),
-      MessageModel.aggregate([
-        {
-          $match: {
-            type: 'file',
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-            deletedByAdmin: { $ne: true },
-            'fileMeta.mimeType': { $exists: true }
-          }
-        },
-        {
-          $group: {
-            _id: '$fileMeta.mimeType',
-            count: { $sum: 1 },
-            avgSize: { $avg: '$fileMeta.size' }
-          }
-        },
-        { $sort: { count: -1 } },
-        { $limit: 1 }
-      ]).allowDiskUse(true)
-    ]);
-
-    // Storage Usage Insights - Comprehensive metrics
-    const [
-      totalStorageUsed,
-      storageUsedLast30Days,
-      storageByRoomStatus,
-      storagePerRoomTop
-    ] = await Promise.all([
-      // Total storage used (all rooms, all time)
-      MessageModel.aggregate([
-        {
-          $match: {
-            type: 'file',
-            deletedByAdmin: { $ne: true },
-            'fileMeta.size': { $exists: true, $gt: 0 }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalSize: { $sum: '$fileMeta.size' }
-          }
-        }
-      ]).allowDiskUse(true),
-      // Storage used in last 30 days
-      MessageModel.aggregate([
-        {
-          $match: {
-            type: 'file',
-            createdAt: { $gte: thirtyDaysAgo, $lte: now },
-            deletedByAdmin: { $ne: true },
-            'fileMeta.size': { $exists: true, $gt: 0 }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalSize: { $sum: '$fileMeta.size' }
-          }
-        }
-      ]).allowDiskUse(true),
-      // Storage used by room status (active / locked / auto-vanish)
-      MessageModel.aggregate([
-        {
-          $match: {
-            type: 'file',
-            deletedByAdmin: { $ne: true },
-            'fileMeta.size': { $exists: true, $gt: 0 }
-          }
-        },
-        {
-          $lookup: {
-            from: 'rooms',
-            localField: 'roomCode',
-            foreignField: 'code',
-            as: 'room'
-          }
-        },
-        {
-          $unwind: { path: '$room', preserveNullAndEmptyArrays: true }
-        },
-        {
-          $project: {
-            size: '$fileMeta.size',
-            roomStatus: {
-              $cond: [
-                { $eq: ['$room.isEnded', true] },
-                'ended',
-                {
-                  $cond: [
-                    { $eq: ['$room.isLocked', true] },
-                    {
-                      $cond: [
-                        {
-                          $and: [
-                            { $ne: ['$room.lockedAt', null] },
-                            { $lt: ['$room.lockedAt', oneDayAgo] },
-                            { $gt: ['$room.expiresAt', now] }
-                          ]
-                        },
-                        'auto-vanish',
-                        'locked'
-                      ]
-                    },
-                    {
-                      $cond: [
-                        { $gt: ['$room.expiresAt', now] },
-                        'active',
-                        'expired'
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        },
-        {
-          $group: {
-            _id: '$roomStatus',
-            totalSize: { $sum: '$size' }
-          }
-        }
-      ]).allowDiskUse(true),
-      // Storage per room (top rooms by storage)
-      MessageModel.aggregate([
-        {
-          $match: {
-            type: 'file',
-            deletedByAdmin: { $ne: true },
-            'fileMeta.size': { $exists: true, $gt: 0 }
-          }
-        },
-        {
-          $group: {
-            _id: '$roomCode',
-            totalSize: { $sum: '$fileMeta.size' },
-            fileCount: { $sum: 1 }
-          }
-        },
-        {
-          $lookup: {
-            from: 'rooms',
-            localField: '_id',
-            foreignField: 'code',
-            as: 'room'
-          }
-        },
-        {
-          $unwind: { path: '$room', preserveNullAndEmptyArrays: true }
-        },
-        {
-          $project: {
-            roomCode: '$_id',
-            totalSize: 1,
-            fileCount: 1,
-            roomName: { $ifNull: ['$room.name', 'Unknown'] },
-            isLocked: { $ifNull: ['$room.isLocked', false] },
-            isEnded: { $ifNull: ['$room.isEnded', false] }
-          }
-        },
-        { $sort: { totalSize: -1 } },
-        { $limit: 50 }
-      ]).allowDiskUse(true)
-    ]);
-
-    // User Status metrics
-    const [
-      usersActiveToday,
-      usersInActiveRooms,
-      usersInLockedRoomsList,
-      usersInAutoVanishRoomsList,
-      peakConcurrentUsersToday
-    ] = await Promise.all([
-      RoomModel.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay }
-          }
-        },
-        {
-          $unwind: { path: '$participants', preserveNullAndEmptyArrays: true }
-        },
-        {
-          $group: {
-            _id: '$participants'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      RoomModel.aggregate([
-        {
-          $match: {
-            isEnded: { $ne: true },
-            isLocked: { $ne: true },
-            expiresAt: { $gt: now }
-          }
-        },
-        {
-          $unwind: { path: '$participants', preserveNullAndEmptyArrays: true }
-        },
-        {
-          $group: {
-            _id: '$participants'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      RoomModel.aggregate([
-        {
-          $match: {
-            isLocked: true,
-            isEnded: { $ne: true }
-          }
-        },
-        {
-          $unwind: { path: '$participants', preserveNullAndEmptyArrays: true }
-        },
-        {
-          $group: {
-            _id: '$participants'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      RoomModel.aggregate([
-        {
-          $match: {
-            isLocked: true,
-            isEnded: { $ne: true },
-            expiresAt: { $gt: now },
-            lockedAt: {
-              $exists: true,
-              $gte: oneDayAgo,
-              $lte: now
-            }
-          }
-        },
-        {
-          $unwind: { path: '$participants', preserveNullAndEmptyArrays: true }
-        },
-        {
-          $group: {
-            _id: '$participants'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      RoomModel.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay }
-          }
-        },
-        {
-          $project: {
-            participantCount: { $size: { $ifNull: ['$participants', []] } }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            maxUsers: { $max: '$participantCount' }
-          }
-        }
-      ]).allowDiskUse(true)
-    ]);
-
-    // User Growth metrics - using UserVisit for accurate tracking
-    const yesterdayStart = new Date(startOfDay);
-    yesterdayStart.setUTCDate(yesterdayStart.getUTCDate() - 1);
-    const yesterdayEnd = new Date(startOfDay);
-    
-    const [
-      usersJoinedToday,
-      usersJoinedYesterday,
-      usersJoinedLast30Days,
-      totalUniqueUsersLifetime,
-      totalUserVisitsLifetime,
-      totalUserVisitsToday,
-      uniqueUsersFromMessages
-    ] = await Promise.all([
-      // Unique users who joined rooms today (from UserVisit)
-      UserVisitModel.aggregate([
-        {
-          $match: {
-            joinedAt: { $gte: startOfDay, $lte: endOfDay }
-          }
-        },
-        {
-          $group: {
-            _id: '$userId'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      // Unique users who joined rooms yesterday (from UserVisit)
-      UserVisitModel.aggregate([
-        {
-          $match: {
-            joinedAt: { $gte: yesterdayStart, $lte: yesterdayEnd }
-          }
-        },
-        {
-          $group: {
-            _id: '$userId'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      // Day-wise unique users joined (last 30 days) - for chart
-      UserVisitModel.aggregate([
-        {
-          $match: {
-            joinedAt: { $gte: thirtyDaysAgo, $lte: now }
-          }
-        },
-        {
-          $project: {
-            userId: 1,
-            date: { $dateToString: { format: '%Y-%m-%d', date: '$joinedAt' } }
-          }
-        },
-        {
-          $group: {
-            _id: { date: '$date', userId: '$userId' }
-          }
-        },
-        {
-          $group: {
-            _id: '$_id.date',
-            count: { $sum: 1 }
-          }
-        },
-        {
-          $sort: { _id: 1 }
-        }
-      ]).allowDiskUse(true),
-      // Total unique users lifetime (from UserVisit - most accurate)
-      UserVisitModel.aggregate([
-        {
-          $group: {
-            _id: '$userId'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      // Total Visits (Lifetime): Use GlobalStats counter (fast) or fallback to count
-      getOrCreateGlobalStat('totalVisitsLifetime').then(async (cached) => {
-        if (cached > 0) return cached;
-        // If counter is 0 or doesn't exist, count from UserVisit and update counter
-        const count = await UserVisitModel.countDocuments({});
-        if (count > 0) {
-          await GlobalStatsModel.findOneAndUpdate(
-            { key: 'totalVisitsLifetime' },
-            { $set: { value: count, lastUpdated: new Date() } },
-            { upsert: true }
-          );
-        }
-        return count || 0; // Ensure we always return a number
-      }).catch(() => {
-        // Fallback if getOrCreateGlobalStat fails
-        return UserVisitModel.countDocuments({}).catch(() => 0);
-      }),
-      // Visits Today: count from UserVisit
-      UserVisitModel.countDocuments({
-        joinedAt: { $gte: startOfDay, $lte: endOfDay }
-      }),
-      // Unique users from messages (fallback/alternative metric)
-      MessageModel.aggregate([
-        {
-          $group: {
-            _id: '$userId'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true)
-    ]);
-
-    // Engagement metrics
-    const [
-      averageUsersPerRoom,
-      usersWhoSentMessageToday,
-      silentUsersToday,
-      averageSessionDuration
-    ] = await Promise.all([
-      RoomModel.aggregate([
-        {
-          $match: {
-            isEnded: { $ne: true },
-            expiresAt: { $gt: now }
-          }
-        },
-        {
-          $project: {
-            participantCount: { $size: { $ifNull: ['$participants', []] } }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            avgUsers: { $avg: '$participantCount' },
-            roomCount: { $sum: 1 }
-          }
-        }
-      ]).allowDiskUse(true),
-      MessageModel.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-            deletedByAdmin: { $ne: true }
-          }
-        },
-        {
-          $group: {
-            _id: '$userId'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      RoomModel.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay }
-          }
-        },
-        {
-          $lookup: {
-            from: 'messages',
-            let: { roomCode: '$code', participants: '$participants' },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $and: [
-                      { $eq: ['$roomCode', '$$roomCode'] },
-                      { $in: ['$userId', '$$participants'] },
-                      { $gte: ['$createdAt', startOfDay] },
-                      { $lte: ['$createdAt', endOfDay] }
-                    ]
-                  },
-                  deletedByAdmin: { $ne: true }
-                }
-              },
-              {
-                $group: {
-                  _id: '$userId'
-                }
-              }
-            ],
-            as: 'usersWithMessages'
-          }
-        },
-        {
-          $project: {
-            participants: 1,
-            usersWithMessages: { $map: { input: '$usersWithMessages', as: 'u', in: '$$u._id' } }
-          }
-        },
-        {
-          $unwind: { path: '$participants', preserveNullAndEmptyArrays: true }
-        },
-        {
-          $match: {
-            $expr: {
-              $not: { $in: ['$participants', '$usersWithMessages'] }
-            }
-          }
-        },
-        {
-          $group: {
-            _id: '$participants'
-          }
-        },
-        {
-          $count: 'count'
-        }
-      ]).allowDiskUse(true),
-      RoomModel.aggregate([
-        {
-          $match: {
-            isEnded: true,
-            endedAt: { $gte: thirtyDaysAgo }
-          }
-        },
-        {
-          $lookup: {
-            from: 'messages',
-            let: { roomCode: '$code' },
-            pipeline: [
-              {
-                $match: {
-                  $expr: { $eq: ['$roomCode', '$$roomCode'] },
-                  deletedByAdmin: { $ne: true }
-                }
-              },
-              {
-                $sort: { createdAt: -1 }
-              },
-              {
-                $limit: 1
-              },
-              {
-                $project: {
-                  lastMessageTime: '$createdAt'
-                }
-              }
-            ],
-            as: 'lastMessage'
-          }
-        },
-        {
-          $project: {
-            sessionDuration: {
-              $subtract: [
-                { $ifNull: [{ $arrayElemAt: ['$lastMessage.lastMessageTime', 0] }, '$endedAt'] },
-                '$createdAt'
-              ]
-            }
-          }
-        },
-        {
-          $match: {
-            sessionDuration: { $gt: 0 }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            avgDuration: { $avg: '$sessionDuration' }
-          }
-        }
-      ]).allowDiskUse(true)
-    ]);
-
-    const { getTodayMetrics } = await import('../services/platformMetricsService.js');
-    const platformMetrics = getTodayMetrics();
-
-    // System Signals metrics (live counters)
-    const reconnectAttempts = platformMetrics.reconnectAttempts;
-    const failedJoinAttempts = platformMetrics.failedJoinAttempts;
-    const usersBlockedLockedVanished = platformMetrics.usersBlockedLockedVanished;
-
-    // System metrics
-    const io = getIoInstance();
-    const socketConnectionsLive = io ? io.sockets.sockets.size : 0;
-    const failedRoomJoins = platformMetrics.failedRoomJoins;
-    const autoVanishJobsRunning = 1; // Assuming one job is always running
-
-    // Get users in locked rooms
-    const lockedRoomsList = await RoomModel.find({
-      isLocked: true,
-      isEnded: { $ne: true }
-    })
-      .select('participants')
-      .lean()
-      .limit(10000)
-      .exec();
-    
-    const usersInLockedRooms = new Set<string>();
-    lockedRoomsList.forEach((room: any) => {
-      if (room.participants && Array.isArray(room.participants)) {
-        room.participants.forEach((userId: string) => usersInLockedRooms.add(userId));
-      }
-    });
-    
-    // Users Online: Get from Socket.IO directly (real-time, not from DB)
-    // Reuse io variable declared above
-    const usersOnline = io ? (io.engine?.clientsCount || io.sockets.sockets.size || 0) : 0;
-
-    // Process day-wise charts
-    const roomsCreatedChart = getDayWiseData(thirtyDaysAgo, now, Array.isArray(roomsCreatedLast30Days) ? roomsCreatedLast30Days.map((r: any) => ({ date: r.createdAt })) : []);
-    // messagesLast30Days is already aggregated by day, just need to fill missing dates
-    const messagesChart = (() => {
-      const dataMap = new Map<string, number>();
-      if (Array.isArray(messagesLast30Days)) {
-        messagesLast30Days.forEach((d: any) => {
-          dataMap.set(d._id, d.count);
-        });
-      }
-      
-      const result: Array<{ date: string; count: number }> = [];
-      const current = new Date(thirtyDaysAgo);
-      while (current <= now) {
-        const dateKey = current.toISOString().split('T')[0];
-        result.push({
-          date: dateKey,
-          count: dataMap.get(dateKey) || 0
-        });
-        current.setDate(current.getDate() + 1);
-      }
-      return result;
-    })();
-
-    // Process vanished by admin vs auto
-    const vanishedByAdmin = Array.isArray(vanishedByAdminVsAuto) ? vanishedByAdminVsAuto.find((v: any) => v && v._id && v._id !== 'auto')?.count || 0 : 0;
-    const vanishedByAuto = Array.isArray(vanishedByAdminVsAuto) ? vanishedByAdminVsAuto.find((v: any) => v && (v._id === 'auto' || !v._id))?.count || 0 : 0;
-    
-    res.json({
-      // Overview
-      totalRooms: totalRooms || 0,
-      activeRooms: activeRooms || 0,
-      lockedRooms: lockedRooms || 0,
-      autoVanishRooms: autoVanishRooms || 0,
-      usersOnline: usersOnline || 0,
-      messagesSentToday: messagesSentToday || 0,
-      filesSharedToday: filesSharedToday || 0,
-      storageUsedToday: (storageUsedToday[0]?.totalSize || 0) / (1024 * 1024), // Convert to MB
-      
-      // Rooms
-      roomsCreatedToday: roomsCreatedToday || 0,
-      roomsCreatedChart,
-      roomsCurrentlyActive: activeRooms,
-      roomsLocked: lockedRooms,
-      roomsInAutoVanishCountdown: autoVanishRooms,
-      roomsEligibleToVanishNow: roomsEligibleToVanishNow || 0,
-      vanishedByAdmin,
-      vanishedByAuto,
-      averageRoomLifetime: averageRoomLifetime[0]?.avgLifetime ? averageRoomLifetime[0].avgLifetime / (1000 * 60 * 60) : 0, // Convert to hours
-      
-      // User Status
-      usersActiveToday: usersActiveToday[0]?.count || 0,
-      peakConcurrentUsersToday: peakConcurrentUsersToday[0]?.maxUsers || 0,
-      usersInActiveRooms: usersInActiveRooms[0]?.count || 0,
-      usersInLockedRooms: usersInLockedRoomsList[0]?.count || 0,
-      usersInAutoVanishRooms: usersInAutoVanishRoomsList[0]?.count || 0,
-      
-      // User Growth
-      usersJoinedToday: usersJoinedToday[0]?.count || 0,
-      usersJoinedYesterday: usersJoinedYesterday[0]?.count || 0,
-      usersJoinedChart: (() => {
-        // Convert aggregation result to chart format and fill missing dates
-        const dataMap = new Map<string, number>();
-        if (Array.isArray(usersJoinedLast30Days)) {
-          usersJoinedLast30Days.forEach((d: any) => {
-            dataMap.set(d._id, d.count);
-          });
-        }
-        
-        const result: Array<{ date: string; count: number }> = [];
-        const current = new Date(thirtyDaysAgo);
-        while (current <= now) {
-          const dateKey = current.toISOString().split('T')[0];
-          result.push({
-            date: dateKey,
-            count: dataMap.get(dateKey) || 0
-          });
-          current.setDate(current.getDate() + 1);
-        }
-        return result;
-      })(),
-      totalUniqueUsersLifetime: totalUniqueUsersLifetime[0]?.count || uniqueUsersFromMessages[0]?.count || 0,
-      totalUserVisitsLifetime: totalUserVisitsLifetime || 0,
-      totalUserVisitsToday: totalUserVisitsToday || 0,
-      
-      // Engagement
-      averageUsersPerRoom: averageUsersPerRoom[0]?.avgUsers || 0,
-      usersWhoSentMessageToday: usersWhoSentMessageToday[0]?.count || 0,
-      silentUsersToday: silentUsersToday[0]?.count || 0,
-      averageSessionDuration: averageSessionDuration[0]?.avgDuration ? averageSessionDuration[0].avgDuration / (1000 * 60) : 0, // Convert to minutes
-      
-      // System Signals
-      reconnectAttempts: reconnectAttempts || 0,
-      failedJoinAttempts: failedJoinAttempts || 0,
-      usersBlockedLockedVanished: usersBlockedLockedVanished || 0,
-      
-      // Messages
-      messagesChart: messagesChart || [],
-      peakMessagingTimeToday: peakMessagingTimeToday[0]?._id !== undefined ? `${peakMessagingTimeToday[0]._id}:00` : 'N/A',
-      
-      // Files
-      averageFileSize: fileStats[0]?.avgSize ? fileStats[0].avgSize / (1024 * 1024) : 0, // Convert to MB
-      mostCommonFileType: fileStats[0]?._id || 'N/A',
-      
-      // Storage Usage Insights
-      totalStorageUsed: (totalStorageUsed[0]?.totalSize || 0) / (1024 * 1024), // Convert to MB
-      storageUsedLast30Days: (storageUsedLast30Days[0]?.totalSize || 0) / (1024 * 1024), // Convert to MB
-      storageByRoomStatus: {
-        active: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s._id === 'active')?.totalSize || 0 : 0) / (1024 * 1024),
-        locked: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s._id === 'locked')?.totalSize || 0 : 0) / (1024 * 1024),
-        'auto-vanish': (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s._id === 'auto-vanish')?.totalSize || 0 : 0) / (1024 * 1024),
-        ended: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s._id === 'ended')?.totalSize || 0 : 0) / (1024 * 1024),
-        expired: (Array.isArray(storageByRoomStatus) ? storageByRoomStatus.find((s: any) => s._id === 'expired')?.totalSize || 0 : 0) / (1024 * 1024)
-      },
-      storagePerRoomTop: Array.isArray(storagePerRoomTop) ? storagePerRoomTop.map((room: any) => ({
-        roomCode: room.roomCode,
-        roomName: room.roomName,
-        totalSize: room.totalSize / (1024 * 1024), // Convert to MB
-        fileCount: room.fileCount,
-        isLocked: room.isLocked,
-        isEnded: room.isEnded
-      })) : [],
-      
-      // System
-      socketConnectionsLive: socketConnectionsLive || 0,
-      failedRoomJoins: failedRoomJoins || 0,
-      uploadFailuresToday: platformMetrics.uploadFailures,
-      uploadsGcsToday: platformMetrics.uploadsGcs,
-      uploadsLocalToday: platformMetrics.uploadsLocal,
-      gcsFallbackRate: platformMetrics.gcsFallbackRate,
-      uploadSuccessRate: platformMetrics.uploadSuccessRate,
-      autoVanishJobsRunning: autoVanishJobsRunning || 0,
-      
-      // Legacy fields for backward compatibility
-      vanishedToday: vanishedTodayResult[0]?.count || 0,
-      roomsExpiringInNextHour: roomsExpiringNextHour,
-      roomsExpiringToday: roomsExpiringToday,
-      timestamp: new Date().toISOString()
-    });
+    const insights = await getDashboardInsightsCached();
+    res.json(insights);
   } catch (error: any) {
-    logger.error('Error getting dashboard insights', { 
+    logger.error('Error getting dashboard insights', {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
       adminId: req.adminId,
@@ -1315,6 +365,12 @@ export const getDebugStats = async (req: AdminRequest, res: Response): Promise<v
   }
 };
 
+/**
+ * Live per-room user counts (Redis-pipelined, cross-instance accurate —
+ * see roomPresenceService.ts) replace the old per-room, per-request logic
+ * that trusted the local Socket.IO adapter first and fell back to the
+ * always-empty Room.participants field as a last resort.
+ */
 export const getActiveRoomsList = async (req: AdminRequest, res: Response): Promise<void> => {
   try {
     const now = new Date();
@@ -1323,65 +379,22 @@ export const getActiveRoomsList = async (req: AdminRequest, res: Response): Prom
       isLocked: { $ne: true },
       expiresAt: { $gt: now }
     })
-      .select('code name createdAt participants')
+      .select('code name createdAt')
       .sort({ createdAt: -1 })
       .lean()
       .exec();
 
-    const redis = getRedis();
-    const io = getIoInstance();
-    const roomsWithUserCounts = await Promise.all(
-      rooms.map(async (room: any) => {
-        let userCount = 0;
-        let socketRoomExists = false;
-        
-        // Priority 1: Socket.IO (most real-time, reflects current connections)
-        // If Socket.IO room exists (even with 0 users), use it as it's the most accurate current state
-              if (io) {
-                const socketRoom = io.sockets.adapter.rooms.get(room.code);
-          if (socketRoom !== undefined) {
-            // Room exists in Socket.IO - use its size (can be 0 if empty)
-                  userCount = socketRoom.size;
-            socketRoomExists = true;
-          }
-        }
-        
-        // Priority 2: Redis (only if Socket.IO room doesn't exist or Socket.IO is unavailable)
-        // Use Redis if Socket.IO room doesn't exist, as it might have persistent tracking
-        if (!socketRoomExists && redis && isRedisAvailable()) {
-          try {
-            // Check if the Redis key exists first
-            const keyExists = await redis.exists(`room:${room.code}:users`);
-            if (keyExists) {
-              const redisCount = await redis.scard(`room:${room.code}:users`);
-              if (redisCount > 0) {
-                userCount = redisCount;
-              }
-            }
-          } catch (error) {
-            logger.warn(`Failed to get Redis count for room ${room.code}`, {
-              error: error instanceof Error ? error.message : String(error)
-            });
-          }
-        }
-        
-        // Priority 3: Fallback to participants array (last resort, may be outdated)
-        // Only use if both Socket.IO and Redis returned 0 or are unavailable
-        if (userCount === 0 && !socketRoomExists) {
-          userCount = room.participants?.length || 0;
-        }
+    const counts = await getLiveUserCountsForRooms(getIoInstance(), rooms.map((r: any) => r.code));
 
-        return {
-          code: room.code,
-          name: room.name || room.code,
-          status: 'Active',
-          userCount,
-          createdAt: room.createdAt,
-        };
-      })
-    );
-
-    res.json({ rooms: roomsWithUserCounts });
+    res.json({
+      rooms: rooms.map((room: any) => ({
+        code: room.code,
+        name: room.name || room.code,
+        status: 'Active',
+        userCount: counts.get(room.code) ?? 0,
+        createdAt: room.createdAt,
+      })),
+    });
   } catch (error: any) {
     logger.error('Error getting active rooms list', {
       error: error instanceof Error ? error.message : String(error),
@@ -1397,66 +410,23 @@ export const getLockedRoomsList = async (req: AdminRequest, res: Response): Prom
       isLocked: true,
       isEnded: { $ne: true }
     })
-      .select('code name createdAt participants lockedAt')
+      .select('code name createdAt lockedAt')
       .sort({ lockedAt: -1 })
       .lean()
       .exec();
 
-    const redis = getRedis();
-    const io = getIoInstance();
-    const roomsWithUserCounts = await Promise.all(
-      rooms.map(async (room: any) => {
-        let userCount = 0;
-        let socketRoomExists = false;
-        
-        // Priority 1: Socket.IO (most real-time, reflects current connections)
-        // If Socket.IO room exists (even with 0 users), use it as it's the most accurate current state
-        if (io) {
-          const socketRoom = io.sockets.adapter.rooms.get(room.code);
-          if (socketRoom !== undefined) {
-            // Room exists in Socket.IO - use its size (can be 0 if empty)
-            userCount = socketRoom.size;
-            socketRoomExists = true;
-          }
-        }
-        
-        // Priority 2: Redis (only if Socket.IO room doesn't exist or Socket.IO is unavailable)
-        // Use Redis if Socket.IO room doesn't exist, as it might have persistent tracking
-        if (!socketRoomExists && redis && isRedisAvailable()) {
-          try {
-            // Check if the Redis key exists first
-            const keyExists = await redis.exists(`room:${room.code}:users`);
-            if (keyExists) {
-              const redisCount = await redis.scard(`room:${room.code}:users`);
-              if (redisCount > 0) {
-                userCount = redisCount;
-              }
-            }
-          } catch (error) {
-            logger.warn(`Failed to get Redis count for locked room ${room.code}`, {
-              error: error instanceof Error ? error.message : String(error)
-            });
-          }
-        }
-        
-        // Priority 3: Fallback to participants array (last resort, may be outdated)
-        // Only use if both Socket.IO and Redis returned 0 or are unavailable
-        if (userCount === 0 && !socketRoomExists) {
-          userCount = room.participants?.length || 0;
-        }
+    const counts = await getLiveUserCountsForRooms(getIoInstance(), rooms.map((r: any) => r.code));
 
-        return {
-      code: room.code,
-      name: room.name || room.code,
-      status: 'Locked',
-          userCount,
-      createdAt: room.createdAt,
-      lockedAt: room.lockedAt,
-        };
-      })
-    );
-
-    res.json({ rooms: roomsWithUserCounts });
+    res.json({
+      rooms: rooms.map((room: any) => ({
+        code: room.code,
+        name: room.name || room.code,
+        status: 'Locked',
+        userCount: counts.get(room.code) ?? 0,
+        createdAt: room.createdAt,
+        lockedAt: room.lockedAt,
+      })),
+    });
   } catch (error: any) {
     logger.error('Error getting locked rooms list', {
       error: error instanceof Error ? error.message : String(error),
@@ -1486,7 +456,7 @@ export const vanishRoom = async (req: AdminRequest, res: Response): Promise<void
     const previousStatus = room.isLocked ? 'locked' : 'active';
 
     // Invalidate cache
-    await invalidateAdminCache('insights');
+    await invalidateDashboardCache();
 
     // Vanish the room
     await adminVanishRoom(roomCode, adminId, previousStatus);
@@ -1545,4 +515,3 @@ export const getRoomDetailByCode = async (req: AdminRequest, res: Response): Pro
     res.status(500).json({ error: 'Failed to fetch room detail' });
   }
 };
-

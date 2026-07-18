@@ -65,5 +65,12 @@ export interface SocketUser {
     nickname: string;
     avatar?: string;
     roomCode: string;
+    /**
+     * Super Admin Ghost Mode — set only by resolveGhostModeFromSocket() after
+     * verifying the platform session cookie server-side against the
+     * GHOST_MODE_ADMIN_EMAILS allowlist. Never trust a client-supplied value
+     * for this; there isn't one — clients cannot set or request this flag.
+     */
+    isGhost?: boolean;
 }
 //# sourceMappingURL=index.d.ts.map
