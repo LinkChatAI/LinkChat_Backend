@@ -46,6 +46,10 @@ const RATE_LIMITS: Record<string, RateLimitConfig> = {
     windowMs: 15 * 60 * 1000,
     maxRequests: 30,
   },
+  sessionExchange: {
+    windowMs: 60 * 1000, // 1 minute
+    maxRequests: 20, // generous enough for periodic re-bridging across tabs, tight enough against abuse of a security-sensitive endpoint
+  },
   default: {
     windowMs: 60 * 1000, // 1 minute
     maxRequests: 10, // 10 requests per minute

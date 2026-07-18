@@ -10,7 +10,9 @@ import {
   isGoogleOAuthConfigured,
 } from '../services/authService.js';
 import { generateOAuthState, verifyOAuthState } from '../utils/userJwt.js';
+import { generateUserAccessToken } from '../utils/userJwt.js';
 import { getUserById } from '../services/authService.js';
+import { createSessionExchangeCode, consumeSessionExchangeCode } from '../services/sessionExchangeService.js';
 import { logger } from '../utils/logger.js';
 import { z } from 'zod';
 
@@ -21,21 +23,25 @@ const getFrontendUrl = (): string => {
   return url;
 };
 
-const setAuthCookies = (res: Response, accessToken: string, refreshToken: string): void => {
-  const cookieOptions = {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
-    path: '/',
-  };
+const baseCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: (isProduction ? 'none' : 'lax') as 'none' | 'lax',
+  path: '/',
+};
 
+const setAccessTokenCookie = (res: Response, accessToken: string): void => {
   res.cookie('lc_access_token', accessToken, {
-    ...cookieOptions,
+    ...baseCookieOptions,
     maxAge: 15 * 60 * 1000,
   });
+};
+
+const setAuthCookies = (res: Response, accessToken: string, refreshToken: string): void => {
+  setAccessTokenCookie(res, accessToken);
 
   res.cookie('lc_refresh_token', refreshToken, {
-    ...cookieOptions,
+    ...baseCookieOptions,
     maxAge: 7 * 24 * 60 * 60 * 1000,
     path: '/api/auth',
   });
@@ -181,4 +187,60 @@ export const authStatusHandler = (_req: UserAuthRequest, res: Response): void =>
   res.json({
     oauthConfigured: isGoogleOAuthConfigured(),
   });
+};
+
+/**
+ * Step 1 of the cross-domain session bridge (see sessionExchangeService.ts):
+ * called from linkchat.in (proxied through Netlify, so it carries the
+ * primary lc_access_token cookie normally) to mint a short-lived, single-use
+ * code proving "this browser is already logged in as this user".
+ */
+export const createSessionExchangeHandler = async (req: UserAuthRequest, res: Response): Promise<void> => {
+  if (!req.user) {
+    res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+    return;
+  }
+
+  const code = await createSessionExchangeCode(req.user.userId);
+  if (!code) {
+    res.status(503).json({ error: 'Session exchange unavailable' });
+    return;
+  }
+
+  res.json({ code });
+};
+
+/**
+ * Step 2: called directly against the backend's own domain (cross-origin
+ * from linkchat.in, credentials included — CORS already allows this origin
+ * with credentials, see index.ts). Redeems the one-time code and sets an
+ * independent access-token cookie scoped to this domain, so a socket
+ * handshake landing here (see utils/ghostMode.ts) can see a session too.
+ * Deliberately access-token only, no refresh token — this is a short-lived
+ * bridge, not a parallel login; the frontend re-runs the exchange whenever
+ * it refreshes its own session (see AuthContext.tsx), which naturally keeps
+ * this cookie from going stale for as long as the user stays logged in.
+ */
+export const consumeSessionExchangeHandler = async (req: UserAuthRequest, res: Response): Promise<void> => {
+  const code = typeof req.query.code === 'string' ? req.query.code : '';
+  if (!code) {
+    res.status(400).json({ error: 'Missing code' });
+    return;
+  }
+
+  const userId = await consumeSessionExchangeCode(code);
+  if (!userId) {
+    res.status(401).json({ error: 'Invalid or expired code', code: 'EXCHANGE_INVALID' });
+    return;
+  }
+
+  const user = await getUserById(userId);
+  if (!user || user.status !== 'active') {
+    res.status(401).json({ error: 'Account not available', code: 'AUTH_INVALID' });
+    return;
+  }
+
+  const accessToken = generateUserAccessToken(userId, user.email, user.plan);
+  setAccessTokenCookie(res, accessToken);
+  res.json({ success: true });
 };
