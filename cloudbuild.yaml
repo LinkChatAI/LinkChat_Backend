@@ -67,7 +67,10 @@ steps:
       # any polling handshake that still occurs (e.g. a dev client hitting prod).
       - '--session-affinity'
       - '--set-env-vars'
-      - 'PORT=8080,NODE_ENV=production'
+      # PORT is a Cloud Run-reserved env var (implied by --port above) — the
+      # platform now rejects deploys that try to set it explicitly, which was
+      # silently blocking every deploy through this pipeline.
+      - 'NODE_ENV=production'
 
 images:
   - 'gcr.io/$PROJECT_ID/linkchat-backend:$BUILD_ID'

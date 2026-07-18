@@ -205,16 +205,25 @@ export const getUniqueUsersLifetimeCount = async (): Promise<number> => {
 
 // ---- Peak concurrent users (true running high-water-mark) ------------
 
+// Atomic "set only if greater" for a plain string key — GT/LT conditions are
+// a sorted-set (ZADD) feature, not part of the plain SET command, so a Lua
+// script is used here instead of relying on SET's flag support (which was
+// the original, incorrect approach and failed on every single call in prod).
+const PEAK_CONCURRENT_SCRIPT = `
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if tonumber(ARGV[1]) > current then
+  redis.call('SET', KEYS[1], ARGV[1])
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 1
+`;
+
 export const recordPeakConcurrent = async (count: number): Promise<void> => {
   const redis = getRedis();
   if (!redis || !isRedisAvailable() || count <= 0) return;
   try {
     const key = `stats:peak_concurrent:${dateKey()}`;
-    // SET ... GT only applies the write if greater than the current value
-    // (and always succeeds if the key doesn't exist yet) — an atomic
-    // high-water-mark with no read-then-write race. Requires Redis >= 6.2.
-    await redis.set(key, String(count), 'GT');
-    await redis.expire(key, HOURLY_KEY_TTL_SECONDS).catch(() => {});
+    await redis.eval(PEAK_CONCURRENT_SCRIPT, 1, key, String(count), String(HOURLY_KEY_TTL_SECONDS));
   } catch (error: unknown) {
     logger.warn('Failed to record peak concurrent users', { error: error instanceof Error ? error.message : String(error) });
   }
