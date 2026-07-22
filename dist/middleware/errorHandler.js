@@ -48,8 +48,13 @@ export const errorHandler = (err, req, res, next) => {
             error: message,
         });
     }
+    // 4xx messages are deliberate, user-facing text controllers wrote for this
+    // exact response — safe to pass through. 5xx messages are almost always an
+    // unhandled exception's raw text (driver errors, GCS SDK errors, etc.) and
+    // must never reach the client, even outside development — only the full
+    // detail logged above is for developers.
     res.status(statusCode).json({
-        error: message,
+        error: statusCode >= 500 ? 'Something went wrong. Please try again later.' : message,
         ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
     });
 };

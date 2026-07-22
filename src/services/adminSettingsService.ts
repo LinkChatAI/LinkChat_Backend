@@ -22,6 +22,7 @@ export interface AdminSettingsValues {
   defaultRoomExpiryHours: number;
   autoVanishHours: number;
   maxParticipantsPerRoom: number; // 0 = unlimited
+  adminLeaveGraceMinutes: number;
   maxFileSizeMb: number;
   fileUploadsEnabled: boolean;
   roomCreationEnabled: boolean;
@@ -37,11 +38,14 @@ export interface AdminSettingsValues {
  *   - maxFileSizeMb           <- env.MAX_FILE_SIZE_BYTES (300MB)
  *   - maxParticipantsPerRoom  <- 0, i.e. unlimited, which is what the join
  *     path enforced before (no cap existed anywhere in the codebase).
+ *   - adminLeaveGraceMinutes  <- 60, matching the grace period that was
+ *     previously hardcoded in roomLifecycleHandlers' leave/disconnect timers.
  */
 export const getDefaultSettings = (): AdminSettingsValues => ({
   defaultRoomExpiryHours: env.DEFAULT_ROOM_EXP_HOURS,
   autoVanishHours: 24,
   maxParticipantsPerRoom: 0,
+  adminLeaveGraceMinutes: 60,
   maxFileSizeMb: Math.round(env.MAX_FILE_SIZE_BYTES / (1024 * 1024)),
   fileUploadsEnabled: true,
   roomCreationEnabled: true,
@@ -61,6 +65,7 @@ const toValues = (doc: IAdminSettings | null): AdminSettingsValues => {
     defaultRoomExpiryHours: doc.defaultRoomExpiryHours ?? defaults.defaultRoomExpiryHours,
     autoVanishHours: doc.autoVanishHours ?? defaults.autoVanishHours,
     maxParticipantsPerRoom: doc.maxParticipantsPerRoom ?? defaults.maxParticipantsPerRoom,
+    adminLeaveGraceMinutes: doc.adminLeaveGraceMinutes ?? defaults.adminLeaveGraceMinutes,
     maxFileSizeMb: doc.maxFileSizeMb ?? defaults.maxFileSizeMb,
     fileUploadsEnabled: doc.fileUploadsEnabled ?? defaults.fileUploadsEnabled,
     roomCreationEnabled: doc.roomCreationEnabled ?? defaults.roomCreationEnabled,

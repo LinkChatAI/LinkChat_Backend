@@ -2,6 +2,7 @@ import { Server } from 'socket.io';
 import mongoose from 'mongoose';
 import { getRedisClient, isRedisAvailable } from '../../config/redis.js';
 import { getRoomByCode, verifyRoomToken, lockRoom } from '../../services/roomService.js';
+import { getSettingsSync } from '../../services/adminSettingsService.js';
 import { createMessage } from '../../services/messageService.js';
 import { logger } from '../../utils/logger.js';
 import { MessageModel } from '../../models/Message.js';
@@ -40,6 +41,25 @@ export const clearPendingDeletionTimer = (roomCode: string): void => {
   }
 };
 
+/**
+ * Admin-leave grace period, in minutes — configurable via the admin dashboard
+ * (Settings → Room Lifecycle Rules), defaulting to 60 (the old hardcoded
+ * value) when nothing has been configured yet or the settings cache hasn't
+ * warmed up.
+ */
+const getAdminGraceMinutes = (): number => getSettingsSync().adminLeaveGraceMinutes || 60;
+
+/** e.g. 90 -> "1h 30m", 60 -> "1 hour", 20 -> "20 minutes" */
+const formatGraceDuration = (minutes: number): string => {
+  if (!minutes || minutes <= 0) return 'a short grace period';
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+};
+
 // Grace-period timers for non-admin participants who disconnect (mobile app
 // switch, brief network drop, tab close without an explicit leave). Mirrors
 // the admin pendingDeletionTimers pattern above but scoped per user+room and
@@ -65,7 +85,12 @@ export const clearPendingUserLeaveTimer = (roomCode: string, userId: string): vo
   }
 };
 
-const destroyRoomAfterGracePeriod = async (io: Server, roomCode: string, adminUserId: string): Promise<void> => {
+const destroyRoomAfterGracePeriod = async (
+  io: Server,
+  roomCode: string,
+  adminUserId: string,
+  graceLabel: string
+): Promise<void> => {
   try {
     logger.info(`Grace period expired for room ${roomCode}, destroying room`);
 
@@ -85,7 +110,7 @@ const destroyRoomAfterGracePeriod = async (io: Server, roomCode: string, adminUs
     try {
       const systemMessage = await createMessage(
         roomCode, 'system', 'System',
-        'Host did not return within 1 hour. Room has been closed.', 'text'
+        `Host did not return within ${graceLabel}. Room has been closed.`, 'text'
       );
       io.to(roomCode).emit('newMessage', systemMessage);
     } catch (msgError: any) {
@@ -112,7 +137,7 @@ const destroyRoomAfterGracePeriod = async (io: Server, roomCode: string, adminUs
     clearAllRoomState(roomCode);
 
     io.to(roomCode).emit('room_vanished', {
-      reason: 'Host did not return within 1 hour. Room has been closed.',
+      reason: `Host did not return within ${graceLabel}. Room has been closed.`,
       roomId: roomCode,
       vanishedBy: adminUserId,
     });
@@ -295,15 +320,17 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
       const room = await getRoomByCode(roomId);
 
       if (room && room.ownerId && room.ownerId === authUserId && !room.isLocked && !room.isEnded) {
-        // Admin intentionally leaving — start 1-hour grace period (same as disconnect).
-        // Room is NOT locked; admin can rejoin within 1 hour and resume as host.
-        logger.info(`Admin ${authUserId} leaving room ${roomId} - starting 1-hour grace period`);
+        // Admin intentionally leaving — start the configurable grace period (same as disconnect).
+        // Room is NOT locked; admin can rejoin within the window and resume as host.
+        const graceMinutes = getAdminGraceMinutes();
+        const graceLabel = formatGraceDuration(graceMinutes);
+        logger.info(`Admin ${authUserId} leaving room ${roomId} - starting ${graceLabel} grace period`);
         clearPendingDeletionTimer(roomId);
 
-        const gracePeriodMs = 3_600_000; // 1 hour
+        const gracePeriodMs = graceMinutes * 60_000;
         const capturedRoomId = roomId;
         const timer = setTimeout(() => {
-          destroyRoomAfterGracePeriod(io, capturedRoomId, authUserId).catch(err => {
+          destroyRoomAfterGracePeriod(io, capturedRoomId, authUserId, graceLabel).catch(err => {
             logger.error('Error in destroyRoomAfterGracePeriod (leave_room)', {
               error: err instanceof Error ? err.message : String(err),
             });
@@ -315,11 +342,11 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
 
         io.to(roomId).emit('adminOffline', {
           roomId,
-          message: 'Host has left. Room will close in 1 hour if host does not return.',
-          gracePeriodSeconds: 3600,
+          message: `Host has left. Room will close in ${graceLabel} if host does not return.`,
+          gracePeriodSeconds: gracePeriodMs / 1000,
         });
 
-        logger.info(`Grace period timer started for room ${roomId}, expires in 1 hour`);
+        logger.info(`Grace period timer started for room ${roomId}, expires in ${graceLabel}`);
       }
 
       await handleUserLeaveRoom(roomId, user.userId, true);
@@ -361,14 +388,16 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         const room = await getRoomByCode(user.roomCode);
 
         if (room && room.ownerId && room.ownerId === authUserId && !room.isLocked && !room.isEnded) {
-          logger.info(`Admin ${authUserId} disconnected from room ${user.roomCode} - starting 1-hour grace period`);
+          const graceMinutes = getAdminGraceMinutes();
+          const graceLabel = formatGraceDuration(graceMinutes);
+          logger.info(`Admin ${authUserId} disconnected from room ${user.roomCode} - starting ${graceLabel} grace period`);
           clearPendingDeletionTimer(user.roomCode);
 
           // Capture by value before user.roomCode is cleared below
           const roomCodeForTimer = user.roomCode;
-          const gracePeriodMs = 3_600_000; // 1 hour — admin can rejoin and resume as host
+          const gracePeriodMs = graceMinutes * 60_000; // admin can rejoin within this window and resume as host
           const timer = setTimeout(() => {
-            destroyRoomAfterGracePeriod(io, roomCodeForTimer, authUserId).catch(err => {
+            destroyRoomAfterGracePeriod(io, roomCodeForTimer, authUserId, graceLabel).catch(err => {
               logger.error('Error in destroyRoomAfterGracePeriod', {
                 error: err instanceof Error ? err.message : String(err),
               });
@@ -379,11 +408,11 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
 
           io.to(roomCodeForTimer).emit('adminOffline', {
             roomId: roomCodeForTimer,
-            message: 'Host disconnected. Room will close in 1 hour if host does not return.',
-            gracePeriodSeconds: 3600,
+            message: `Host disconnected. Room will close in ${graceLabel} if host does not return.`,
+            gracePeriodSeconds: gracePeriodMs / 1000,
           });
 
-          logger.info(`Grace period timer started for room ${roomCodeForTimer}, expires in 1 hour`);
+          logger.info(`Grace period timer started for room ${roomCodeForTimer}, expires in ${graceLabel}`);
         } else {
           // Don't remove the participant the instant the transport drops — mobile
           // backgrounding/app-switching and brief network blips look identical to a

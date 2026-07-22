@@ -11,6 +11,14 @@ export const registerReactionHandlers = (ctx: HandlerContext): void => {
         return;
       }
 
+      // A reaction broadcasts the acting userId to the whole room — Ghost
+      // Mode must never surface that identity, so participation is blocked
+      // outright rather than attempted and filtered.
+      if (user.isGhost) {
+        socket.emit('error_alert', { message: 'Ghost Mode is read-only — reactions are disabled.' });
+        return;
+      }
+
       if (
         !data || typeof data !== 'object' ||
         typeof data.messageId !== 'string' || !data.messageId.trim() ||
@@ -45,6 +53,11 @@ export const registerReactionHandlers = (ctx: HandlerContext): void => {
     try {
       if (!ensureUserInRoom()) {
         socket.emit('error_alert', { message: 'Not in a room' });
+        return;
+      }
+
+      if (user.isGhost) {
+        socket.emit('error_alert', { message: 'Ghost Mode is read-only — reactions are disabled.' });
         return;
       }
 

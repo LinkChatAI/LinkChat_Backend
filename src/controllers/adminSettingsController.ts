@@ -21,6 +21,8 @@ const settingsSchema = z
     autoVanishHours: z.number().min(0.0167).max(720),
     // 0 = unlimited
     maxParticipantsPerRoom: z.number().int().min(0).max(100000),
+    // 1 minute .. 24 hours
+    adminLeaveGraceMinutes: z.number().int().min(1).max(1440),
     maxFileSizeMb: z.number().int().min(1).max(2048),
     fileUploadsEnabled: z.boolean(),
     roomCreationEnabled: z.boolean(),

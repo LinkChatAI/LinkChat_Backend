@@ -90,6 +90,17 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
         return;
       }
 
+      // Ghost Mode is read-only monitoring. A message sent as "Ghost Admin"
+      // would be the single most direct way to blow the whole feature's
+      // invisibility guarantee, so this is a hard block regardless of the
+      // room's send permissions/slow mode below.
+      if (user.isGhost) {
+        const errorMsg = 'Ghost Mode is read-only — messaging is disabled.';
+        socket.emit('error_alert', { message: errorMsg });
+        if (ack) ack({ success: false, error: errorMsg });
+        return;
+      }
+
       const authUserId = socket.handshake.auth?.userId || user.userId;
       if (isUserMuted(user.roomCode, authUserId)) {
         const errorMsg = 'You are muted in this room.';
@@ -361,7 +372,9 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
       }
 
       const authUserId = socket.handshake.auth?.userId || user.userId;
-      const isModerator = canModerateRoom(room, authUserId);
+      const isModerator = canModerateRoom(room, authUserId, user.isGhost);
+      // A ghost never sends messages (blocked in sendMessage above), so this
+      // can only be true for a real user acting on their own message.
       const isOwnMessage = message.userId === authUserId;
       const canDelete = isOwnMessage || isModerator;
 
@@ -458,7 +471,7 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
 
       const authUserId = socket.handshake.auth?.userId || user.userId;
       const canDelete =
-        message.userId === authUserId || canModerateRoom(room, authUserId);
+        message.userId === authUserId || canModerateRoom(room, authUserId, user.isGhost);
 
       if (!canDelete) {
         logger.warn(`Unauthorized message deletion attempt: message.userId=${message.userId}, auth.userId=${authUserId}, room.ownerId=${room.ownerId}, requester=${user.userId}`);

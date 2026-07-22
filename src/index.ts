@@ -25,6 +25,8 @@ import planRoutes from './routes/planRoutes.js';
 import subscriptionRoutes from './routes/subscriptionRoutes.js';
 import creditRoutes from './routes/creditRoutes.js';
 import adminBillingRoutes from './routes/adminBillingRoutes.js';
+import donationRoutes from './routes/donationRoutes.js';
+import adminDonationRoutes from './routes/adminDonationRoutes.js';
 import adminUserRoutes from './routes/adminUserRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { authenticateAdmin } from './middleware/adminAuth.js';
@@ -167,7 +169,18 @@ app.use('/api/files/get-upload-url', uploadLimiter);
 
 // Body parser with size limits
 app.use(cookieParser());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  // Keep the exact raw bytes for HMAC webhook verification (Razorpay signs the
+  // raw body — re-serializing the parsed JSON would produce a different digest).
+  // Only retained for the donation webhook path to avoid doubling memory for
+  // every JSON request body.
+  verify: (req, _res, buf) => {
+    if (req.url?.startsWith('/api/donations/webhook')) {
+      (req as any).rawBody = buf;
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Handle local file uploads (PUT requests to /api/uploads/*) - must be before static file serving
@@ -229,11 +242,11 @@ app.get('/healthz', (req, res) => {
 });
 
 // Readiness check endpoint
-app.get('/ready', async (req, res) => {
+const readinessCheckHandler = async (req: express.Request, res: express.Response) => {
   try {
     const mongoose = await import('mongoose');
     const redis = await import('./config/redis.js');
-    
+
     const checks = {
       database: mongoose.default.connection.readyState === 1,
       redis: redis.isRedisAvailable(),
@@ -251,13 +264,20 @@ app.get('/ready', async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
+    // Never leak the raw error text (may include internal driver detail) — this
+    // endpoint is polled unauthenticated by the frontend's outage detector.
     res.status(503).json({
       status: 'not ready',
-      error: error instanceof Error ? error.message : 'Unknown error',
       timestamp: new Date().toISOString(),
     });
   }
-});
+};
+
+app.get('/ready', readinessCheckHandler);
+// Same check under /api so the frontend can reach it via the existing same-origin
+// dev proxy / prod CORS allowlist used by every other API call (see
+// frontend/src/services/serviceHealth.ts) instead of needing separate config.
+app.get('/api/ready', readinessCheckHandler);
 
 // Database connection status endpoint (for debugging, admin-only)
 app.get('/api/admin/db-status', authenticateAdmin, async (req, res) => {
@@ -336,6 +356,8 @@ app.use('/api/admin', adminRoutes);
 // adminRoutes router above (its router.use(authenticateAdmin) intercepts every sub-path
 // unconditionally), so nesting these under /api/admin/* would make them unreachable.
 app.use('/api/billing-admin', adminBillingRoutes);
+app.use('/api/donations', donationRoutes);
+app.use('/api/donations-admin', adminDonationRoutes);
 app.use('/api/rbac-users', adminUserRoutes);
 app.use('/api/plans', planRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);

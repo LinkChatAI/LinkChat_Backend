@@ -406,6 +406,12 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         storageLimitBytes: getStorageLimitForPlan(activeRoom.plan as string | undefined),
         participants,
         banner,
+        // Sent only to this socket (never broadcast) — lets the ghost's own
+        // client enable moderator-only UI (mute/kick/delete). Purely a UI
+        // hint: every action it unlocks is re-authorized server-side via
+        // canModerateRoom's isGhost check, so a forged/stale client value
+        // here can't grant anything by itself.
+        ...(user.isGhost ? { isGhost: true } : {}),
       });
       if (!user.isGhost) {
         socket.to(code).emit('userJoined', { userId: user.userId, nickname: user.nickname });

@@ -66,10 +66,17 @@ steps:
       # Best-effort sticky sessions. Harmless with websocket-only, but protects
       # any polling handshake that still occurs (e.g. a dev client hitting prod).
       - '--session-affinity'
-      - '--set-env-vars'
-      # PORT is a Cloud Run-reserved env var (implied by --port above) — the
-      # platform now rejects deploys that try to set it explicitly, which was
-      # silently blocking every deploy through this pipeline.
+      # --update-env-vars MERGES with whatever's already set on the service
+      # (MONGO_URI, REDIS_URL, JWT_SECRET, GOOGLE_CLIENT_*, ADMIN_SECRET,
+      # GCS_*, etc. — all configured directly on Cloud Run, not tracked here).
+      # --set-env-vars REPLACES the entire env var list with exactly what's
+      # given here — a prior version of this file used --set-env-vars with
+      # only NODE_ENV=production listed, which silently wiped every other env
+      # var on deploy and took production down (MongoDB/Redis both
+      # unreachable) the moment the PORT-reserved-var bug above was fixed and
+      # this step could finally run to completion. Never use --set-env-vars
+      # here unless you intend to fully replace the service's env vars.
+      - '--update-env-vars'
       - 'NODE_ENV=production'
 
 images:

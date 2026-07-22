@@ -38,6 +38,18 @@ const RATE_LIMITS = {
         windowMs: 15 * 60 * 1000,
         maxRequests: 30,
     },
+    donationOrder: {
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        maxRequests: 10, // 10 order creations per IP — each one is a Razorpay API call
+    },
+    donationVerify: {
+        windowMs: 60 * 1000, // 1 minute
+        maxRequests: 20, // verify/failure-report/receipt lookups
+    },
+    sessionExchange: {
+        windowMs: 60 * 1000, // 1 minute
+        maxRequests: 20, // generous enough for periodic re-bridging across tabs, tight enough against abuse of a security-sensitive endpoint
+    },
     default: {
         windowMs: 60 * 1000, // 1 minute
         maxRequests: 10, // 10 requests per minute

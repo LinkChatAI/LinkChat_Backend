@@ -83,6 +83,15 @@ export const registerScreenShareHandlers = (ctx: HandlerContext): void => {
   socket.on('screen_share:request', async () => {
     if (!(await guardRoom())) return;
     try {
+      // A pending request is broadcast to the whole room in screen_share:state
+      // (userId + nickname) so the host can approve it — for Ghost Mode that
+      // would be an outright identity leak to every participant, not just the
+      // host. Read-only monitoring never needs to present, so block outright.
+      if (user.isGhost) {
+        socket.emit('error_alert', { message: 'Ghost Mode is read-only — screen sharing is disabled.' });
+        return;
+      }
+
       if (await isRoomOwner(user.roomCode, user.userId)) {
         socket.emit('error_alert', {
           message: 'As the room host, use Share screen to start directly',
@@ -244,6 +253,12 @@ export const registerScreenShareHandlers = (ctx: HandlerContext): void => {
     }) => {
       if (!ensureUserInRoom()) return;
 
+      // WebRTC signals carry `fromUserId` straight to the target socket —
+      // Ghost Mode never presents or views, so it never has a legitimate
+      // reason to be in this exchange. Block outright rather than rely on it
+      // never reaching a valid presenter/viewer pairing below.
+      if (user.isGhost) return;
+
       const targetUserId = data?.targetUserId?.trim();
       const signalType = data?.signalType;
       if (!targetUserId || !signalType) return;
@@ -291,6 +306,12 @@ export const registerScreenShareHandlers = (ctx: HandlerContext): void => {
 
   socket.on('screen_share:viewer_ready', async () => {
     if (!ensureUserInRoom()) return;
+    // Announcing readiness tells the presenter this socket's userId/nickname
+    // directly (so they can address a WebRTC offer to it) — the presenter
+    // would see "Ghost Admin" join as a viewer. Silently viewing a live
+    // screen share isn't achievable without that handshake, so Ghost Mode
+    // simply never becomes a viewer.
+    if (user.isGhost) return;
     try {
       const presenterId = getScreenSharePresenter(user.roomCode);
       if (!presenterId || presenterId === user.userId) return;
@@ -321,9 +342,12 @@ export const registerScreenShareHandlers = (ctx: HandlerContext): void => {
 
       const sockets = await io.in(user.roomCode).fetchSockets();
       for (const s of sockets) {
-        const viewerId = (s.data as { user?: { userId?: string } })?.user?.userId;
-        if (viewerId && viewerId !== user.userId) {
-          socket.emit('screen_share:viewer_joined', { viewerId });
+        const sUser = (s.data as { user?: { userId?: string; isGhost?: boolean } })?.user;
+        // Defense in depth: a ghost socket should never reach this loop (it
+        // never calls viewer_ready), but never surface one to the presenter
+        // even if that changes.
+        if (sUser?.userId && sUser.userId !== user.userId && !sUser.isGhost) {
+          socket.emit('screen_share:viewer_joined', { viewerId: sUser.userId });
         }
       }
 

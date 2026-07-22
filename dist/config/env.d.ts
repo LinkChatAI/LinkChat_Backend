@@ -27,6 +27,11 @@ interface EnvConfig {
     MONGO_MIN_POOL_SIZE: number;
     /** Comma-separated emails always treated as admin (RBAC bootstrap — auto-promoted on first check). */
     PERMANENT_ADMIN_EMAILS?: string;
+    /** Razorpay live/test key pair for the donation gateway. Donations report "disabled" when unset. */
+    RAZORPAY_KEY_ID?: string;
+    RAZORPAY_KEY_SECRET?: string;
+    /** Secret configured on the Razorpay webhook (Dashboard → Webhooks) — HMAC-verifies /api/donations/webhook. */
+    RAZORPAY_WEBHOOK_SECRET?: string;
     /** Comma-separated emails granted Super Admin Ghost Mode (invisible room monitoring). Verified server-side only. */
     GHOST_MODE_ADMIN_EMAILS: string;
 }

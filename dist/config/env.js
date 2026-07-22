@@ -78,6 +78,9 @@ const validateEnv = () => {
         MONGO_MAX_POOL_SIZE: parseInt(process.env.MONGO_MAX_POOL_SIZE || '50', 10),
         MONGO_MIN_POOL_SIZE: parseInt(process.env.MONGO_MIN_POOL_SIZE || '5', 10),
         PERMANENT_ADMIN_EMAILS: process.env.PERMANENT_ADMIN_EMAILS,
+        RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+        RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET,
+        RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET,
         // Hardcoded default so Ghost Mode works even if Cloud Run env config is
         // incomplete (see prior GOOGLE_CLIENT_ID config-drift incident); still
         // overridable via env var to add/remove Super Admins without a redeploy.

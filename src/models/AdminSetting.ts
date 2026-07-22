@@ -21,6 +21,8 @@ export interface IAdminSettings {
   defaultRoomExpiryHours: number;
   autoVanishHours: number;
   maxParticipantsPerRoom: number; // 0 = unlimited
+  /** Minutes an admin-less room stays alive after the host leaves/disconnects before auto-deletion, unless the host rejoins. */
+  adminLeaveGraceMinutes: number;
 
   // Upload rules
   maxFileSizeMb: number;
@@ -43,6 +45,7 @@ const AdminSettingsSchema = new Schema<IAdminSettings>(
     defaultRoomExpiryHours: { type: Number, required: true, min: 0.0167, max: 720 },
     autoVanishHours: { type: Number, required: true, min: 0.0167, max: 720 },
     maxParticipantsPerRoom: { type: Number, required: true, min: 0, max: 100000 },
+    adminLeaveGraceMinutes: { type: Number, required: true, min: 1, max: 1440 },
 
     maxFileSizeMb: { type: Number, required: true, min: 1, max: 2048 },
     fileUploadsEnabled: { type: Boolean, required: true, default: true },

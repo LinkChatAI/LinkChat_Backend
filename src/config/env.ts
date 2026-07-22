@@ -53,6 +53,11 @@ interface EnvConfig {
   MONGO_MIN_POOL_SIZE: number;
   /** Comma-separated emails always treated as admin (RBAC bootstrap — auto-promoted on first check). */
   PERMANENT_ADMIN_EMAILS?: string;
+  /** Razorpay live/test key pair for the donation gateway. Donations report "disabled" when unset. */
+  RAZORPAY_KEY_ID?: string;
+  RAZORPAY_KEY_SECRET?: string;
+  /** Secret configured on the Razorpay webhook (Dashboard → Webhooks) — HMAC-verifies /api/donations/webhook. */
+  RAZORPAY_WEBHOOK_SECRET?: string;
   /** Comma-separated emails granted Super Admin Ghost Mode (invisible room monitoring). Verified server-side only. */
   GHOST_MODE_ADMIN_EMAILS: string;
 }
@@ -121,6 +126,9 @@ const validateEnv = (): EnvConfig => {
     MONGO_MAX_POOL_SIZE: parseInt(process.env.MONGO_MAX_POOL_SIZE || '50', 10),
     MONGO_MIN_POOL_SIZE: parseInt(process.env.MONGO_MIN_POOL_SIZE || '5', 10),
     PERMANENT_ADMIN_EMAILS: process.env.PERMANENT_ADMIN_EMAILS,
+    RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID,
+    RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET,
+    RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET,
     // Hardcoded default so Ghost Mode works even if Cloud Run env config is
     // incomplete (see prior GOOGLE_CLIENT_ID config-drift incident); still
     // overridable via env var to add/remove Super Admins without a redeploy.

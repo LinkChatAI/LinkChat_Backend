@@ -98,8 +98,10 @@ export const createRoomHandler = async (req, res) => {
         if (error && typeof error === 'object' && 'name' in error) {
             const mongooseError = error;
             if (mongooseError.name === 'MongoServerSelectionError' || mongooseError.name === 'MongoNetworkError') {
+                // Full driver detail (connection string shape, host, etc.) is logged above for
+                // operators; end users only ever see the generic outage-safe message.
                 logger.error('MongoDB connection error when creating room', { error: mongooseError.message });
-                res.status(503).json({ error: 'Database connection failed. Please check your MongoDB connection string.' });
+                res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
                 return;
             }
             if (mongooseError.name === 'ValidationError') {
@@ -120,10 +122,10 @@ export const createRoomHandler = async (req, res) => {
             errorCode: error && typeof error === 'object' && 'code' in error ? error.code : undefined,
             stack: error instanceof Error ? error.stack : undefined
         });
-        // Return more specific error message
-        const errorMessage = error instanceof Error ? error.message : 'Failed to create room';
+        // Unclassified failure — full detail already logged above for operators;
+        // never surface the raw exception message to the client.
         res.status(500).json({
-            error: errorMessage,
+            error: 'Something went wrong. Please try again later.',
             ...(process.env.NODE_ENV === 'development' && {
                 details: error instanceof Error ? error.stack : undefined,
                 errorName: error && typeof error === 'object' && 'name' in error ? error.name : undefined
@@ -146,6 +148,7 @@ export const getRoomHandler = async (req, res) => {
             return;
         }
         logger.debug('Room details requested', { code: room.code });
+        const settings = await getSettings();
         res.json({
             code: room.code,
             slug: room.slug,
@@ -163,6 +166,9 @@ export const getRoomHandler = async (req, res) => {
             coHostIds: room.coHostIds || [],
             slowModeMessagesPerMinute: room.slowModeMessagesPerMinute ?? 0,
             participantsCanSend: room.participantsCanSend !== false,
+            // Lets the client show the real configured grace period (host leaves →
+            // room auto-deletes unless they rejoin) instead of a hardcoded guess.
+            adminLeaveGraceMinutes: settings.adminLeaveGraceMinutes,
         });
     }
     catch (error) {
@@ -201,7 +207,9 @@ export const generateUploadUrlHandler = async (req, res) => {
         // Handle GCS configuration errors (explicit failures from generateUploadUrl)
         if (error instanceof Error) {
             const errorMessage = error.message;
-            // GCS not configured or initialization failed
+            // GCS not configured or initialization failed (includes billing/auth
+            // suspension) — log the raw SDK detail for operators, never send it to
+            // the client.
             if (errorMessage.includes('GCS is not configured') ||
                 errorMessage.includes('GCS client initialization') ||
                 errorMessage.includes('Missing environment variables')) {
@@ -210,7 +218,7 @@ export const generateUploadUrlHandler = async (req, res) => {
                     code: req.params.code,
                 });
                 res.status(503).json({
-                    error: errorMessage,
+                    error: 'Service temporarily unavailable. Please try again later.',
                     code: 'GCS_NOT_CONFIGURED'
                 });
                 return;
@@ -235,14 +243,14 @@ export const generateUploadUrlHandler = async (req, res) => {
                 return;
             }
         }
-        // Unknown errors
+        // Unknown errors — full detail logged for operators only
         logger.error('Unexpected error generating upload URL:', {
             error: error instanceof Error ? error.message : String(error),
             stack: error instanceof Error ? error.stack : undefined,
             code: req.params.code,
         });
         res.status(500).json({
-            error: error instanceof Error ? error.message : 'Failed to generate upload URL',
+            error: 'Something went wrong. Please try again later.',
             code: 'UNKNOWN_ERROR'
         });
     }
@@ -285,7 +293,9 @@ export const generateUploadUrlPublicHandler = async (req, res) => {
         // Handle GCS configuration errors (explicit failures from generateUploadUrl)
         if (error instanceof Error) {
             const errorMessage = error.message;
-            // GCS not configured or initialization failed
+            // GCS not configured or initialization failed (includes billing/auth
+            // suspension) — log the raw SDK detail for operators, never send it to
+            // the client.
             if (errorMessage.includes('GCS is not configured') ||
                 errorMessage.includes('GCS client initialization') ||
                 errorMessage.includes('Missing environment variables')) {
@@ -294,7 +304,7 @@ export const generateUploadUrlPublicHandler = async (req, res) => {
                     code: req.params.code,
                 });
                 res.status(503).json({
-                    error: errorMessage,
+                    error: 'Service temporarily unavailable. Please try again later.',
                     code: 'GCS_NOT_CONFIGURED'
                 });
                 return;
@@ -326,7 +336,7 @@ export const generateUploadUrlPublicHandler = async (req, res) => {
             code: req.params.code,
         });
         res.status(500).json({
-            error: error instanceof Error ? error.message : 'Failed to generate upload URL',
+            error: 'Something went wrong. Please try again later.',
             code: 'UNKNOWN_ERROR'
         });
     }
