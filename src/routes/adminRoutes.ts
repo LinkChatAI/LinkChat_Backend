@@ -44,6 +44,7 @@ import {
   moderateRoom,
   searchRooms,
 } from '../controllers/adminModerationController.js';
+import { runMaintenanceJobs } from '../controllers/maintenanceController.js';
 import { authenticateAdmin } from '../middleware/adminAuth.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
 import { auditAdminAction } from '../middleware/adminAudit.js';
@@ -368,6 +369,17 @@ router.get(
   rateLimiter('adminInsight'),
   auditAdminAction('get_debug_stats'),
   getDebugStats
+);
+
+// Cloud Scheduler target — runs the cleanup / auto-vanish / subscription-expiry
+// jobs on demand. Pairs with ENABLE_IN_PROCESS_TIMERS=false (config/env.ts) so
+// these jobs keep running on schedule even when the Cloud Run instance is
+// allowed to scale to zero between requests instead of staying always-on.
+router.post(
+  '/maintenance/run',
+  rateLimiter('adminAction'),
+  auditAdminAction('run_maintenance'),
+  runMaintenanceJobs
 );
 
 export default router;

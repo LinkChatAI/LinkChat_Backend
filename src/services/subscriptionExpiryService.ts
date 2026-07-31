@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { logger } from '../utils/logger.js';
 import { expireDueSubscriptions } from './subscriptionService.js';
+import { recordJobRun } from './jobHealthService.js';
 
 // Checks for due subscriptions every 15 minutes — expiry timing doesn't need auto-vanish's
 // 5-minute precision, and billing periods are measured in days/months.
@@ -15,7 +16,7 @@ const runExpirySweep = async (): Promise<void> => {
     return;
   }
   try {
-    await expireDueSubscriptions();
+    await recordJobRun('subscription-expiry', expireDueSubscriptions);
   } catch (error: unknown) {
     logger.error('Subscription expiry sweep failed', {
       error: error instanceof Error ? error.message : String(error),

@@ -37,6 +37,19 @@ export const getCachedRoomSockets = (
 };
 
 /**
+ * Drop a room's memoized socket list. Called from the room purge path — without
+ * this the entry is only ever overwritten, never removed, so every room code
+ * that was ever joined keeps a resolved RemoteSocket array alive for the life
+ * of the process. It also matters for correctness rather than just memory:
+ * room codes are recycled (the patterned 4-digit space is only 370 codes), so
+ * a new room could otherwise read the previous tenant's socket list for up to
+ * a full TTL window after the code is reissued.
+ */
+export const clearRoomSocketCache = (roomCode: string): void => {
+  cache.delete(roomCode);
+};
+
+/**
  * Same as getCachedRoomSockets, but excludes ghost-mode sockets — the
  * non-Redis / Redis-error fallback path for participant counting, so a
  * connected Super Admin never inflates the count shown to real users.

@@ -23,7 +23,7 @@ import { HandlerContext, normalizeMessageType, normalizeMessages, stripHeavyCont
 import { isUserMuted } from '../../services/roomModerationService.js';
 import { canModerateRoom } from '../../services/roomPermissionService.js';
 import { checkSlowMode } from '../../services/slowModeService.js';
-import { recordMessageSent, observeBroadcastLatencyMs } from '../../services/metricsService.js';
+import { recordMessageSent, observeBroadcastLatencyMs, recordBytesIn, recordBytesOut } from '../../services/metricsService.js';
 
 export const registerMessageHandlers = (ctx: HandlerContext): void => {
   const { io, socket, user, ensureUserInRoom, emitErrorAlert, typingUsers } = ctx;
@@ -75,6 +75,7 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
   ) => {
     const receivedAt = Date.now();
     try {
+      recordBytesIn(Buffer.byteLength(data?.content || '', 'utf8'));
       if (!ensureUserInRoom()) {
         const errorMsg = 'Not in a room. Please join a room first.';
         socket.emit('error_alert', { message: errorMsg });
@@ -321,6 +322,8 @@ export const registerMessageHandlers = (ctx: HandlerContext): void => {
       io.to(user.roomCode).emit('newMessage', message);
       recordMessageSent();
       observeBroadcastLatencyMs(Date.now() - receivedAt);
+      const recipientCount = io.sockets.adapter.rooms.get(user.roomCode)?.size || 0;
+      recordBytesOut(Buffer.byteLength(JSON.stringify(message), 'utf8') * recipientCount);
       logger.debug(`Message sent in room ${user.roomCode} by user ${user.userId}`, {
         messageId: message.id,
         hasFile: data.type === 'file' || data.type === 'image' || content.includes('[File:'),

@@ -1,5 +1,6 @@
 import { createRoom, getRoomByCode, getRoomBySlugOrCode, endRoom, removeParticipant } from '../services/roomService.js';
-import { generateUploadUrl, deleteRoomFiles } from '../services/gcsService.js';
+import { purgeRoom } from '../services/roomPurgeService.js';
+import { generateUploadUrl } from '../services/gcsService.js';
 import { isFileUploadAvailable } from '../config/gcs.js';
 import { isPremiumPlan } from '../utils/planUtils.js';
 import { z } from 'zod';
@@ -10,7 +11,6 @@ import { generatePairingCodeForRoom, validatePairingCode } from '../services/pai
 import { v4 as uuidv4 } from 'uuid';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
-import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
 import { getStorageLimitForPlan } from '../constants/roomStorage.js';
 import { getSettings } from '../services/adminSettingsService.js';
@@ -432,11 +432,19 @@ export const leaveRoomHandler = async (req, res) => {
     }
 };
 /**
- * Secure deleteRoom (Vanish) function that strictly ensures NO data is left behind.
- * Implements Cleanup Cascade:
- * 1. Wipe Google Cloud Storage files (rooms/{roomCode}/*)
- * 2. Wipe Database (Messages, then Room)
- * 3. Notify Users via Socket.IO (room_vanished event)
+ * DELETE /api/rooms/:code — permanently vanish a room.
+ *
+ * Authorization is mandatory. This endpoint previously had none: no auth
+ * middleware and no ownership check, guarded only by a per-IP rate limit. With
+ * patterned 4-digit codes the entire keyspace is 370 values, so anyone could
+ * enumerate it and permanently destroy every live room on the platform.
+ *
+ * The `authenticateRoom` middleware on this route proves the caller holds a
+ * valid room token. This handler additionally checks that the token was issued
+ * for THIS room — the middleware only verifies the signature and does not
+ * compare its roomCode claim against the :code param, so without this check a
+ * token for any room the caller legitimately owns would authorize deleting
+ * every other room.
  */
 export const deleteRoomHandler = async (req, res) => {
     try {
@@ -453,53 +461,31 @@ export const deleteRoomHandler = async (req, res) => {
             res.status(404).json({ error: 'Room not found' });
             return;
         }
-        // Step 1: Identify the Storage Path
-        // Files are stored as: rooms/{roomCode}/{fileName}
-        const storagePath = `rooms/${roomCode}/`;
-        // Step 2: Wipe Google Cloud Storage
-        // Use deleteRoomFiles which handles GCS deletion with prefix matching
-        // Wrap in try/catch - fail-safe: don't let GCS error block room deletion
-        try {
-            await deleteRoomFiles(roomCode);
-            logger.info(`[VANISH] Step 2: GCS files deleted for room ${roomCode} (prefix: ${storagePath})`);
-        }
-        catch (gcsError) {
-            // Log the error but PROCEED to delete DB data (fail-safe)
-            logger.warn(`[VANISH] Step 2: GCS deletion failed for room ${roomCode} (non-critical, proceeding with DB cleanup)`, {
-                error: gcsError instanceof Error ? gcsError.message : String(gcsError),
+        // req.roomCode is the roomCode claim from the verified token.
+        if (req.roomCode !== roomCode) {
+            logger.warn(`[VANISH] Room-token mismatch on delete`, {
+                requested: roomCode,
+                tokenRoom: req.roomCode,
             });
-        }
-        // Step 3: Wipe Database
-        // Delete all messages first
-        const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
-        logger.info(`[VANISH] Step 3a: Deleted ${messageDeleteResult.deletedCount} messages from room ${roomCode}`);
-        // Delete the room itself
-        const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
-        if (roomDeleteResult.deletedCount === 0) {
-            logger.warn(`[VANISH] Step 3b: Room ${roomCode} was already deleted from database`);
-        }
-        else {
-            logger.info(`[VANISH] Step 3b: Room ${roomCode} deleted from database`);
-        }
-        // Step 4: Notify Users via Socket.IO
-        const io = getIoInstance();
-        if (io) {
-            // Emit room_vanished event to all users in that room
-            io.to(roomCode).emit('room_vanished', {
-                reason: 'Room has been permanently deleted',
-                roomId: roomCode,
-                vanishedAt: new Date().toISOString(),
+            res.status(403).json({
+                error: 'Unauthorized: this token is not valid for this room',
+                code: 'FORBIDDEN',
             });
-            // Force disconnect all sockets in that room
-            io.in(roomCode).disconnectSockets(true);
-            logger.info(`[VANISH] Step 4: Emitted room_vanished event and disconnected sockets for room ${roomCode}`);
+            return;
         }
-        else {
-            logger.warn(`[VANISH] Step 4: Socket.IO instance not available, skipped user notification for room ${roomCode}`);
-        }
-        // Verification Log
-        console.log(`[VANISH] Room ${roomCode} deleted. GCS Files wiped. Messages removed.`);
-        // Return success response
+        const result = await purgeRoom(roomCode, {
+            reason: 'Room has been permanently deleted',
+            trigger: 'api',
+            event: 'room_vanished',
+            actorId: room.ownerId,
+        });
+        logger.info(`[VANISH] Room ${roomCode} purged`, {
+            messagesDeleted: result.messagesDeleted,
+            filesDeleted: result.filesDeleted,
+            socketsDisconnected: result.socketsDisconnected,
+            redisKeysDeleted: result.redisKeysDeleted,
+            errors: result.errors,
+        });
         res.json({ success: true });
     }
     catch (error) {

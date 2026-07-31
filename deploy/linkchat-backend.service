@@ -1,0 +1,25 @@
+[Unit]
+Description=LinkChat backend (Socket.IO + REST) container
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+# Reuses the exact image already built by cloudbuild.yaml — no separate build
+# pipeline for the VM. Update IMAGE to your project's image path.
+Environment=IMAGE=gcr.io/linkchat-480712/linkchat-backend:latest
+Environment=ENV_FILE=/etc/linkchat-backend.env
+
+ExecStartPre=-/usr/bin/docker rm -f linkchat-backend
+ExecStartPre=/usr/bin/docker pull ${IMAGE}
+ExecStart=/usr/bin/docker run --name linkchat-backend \
+  --env-file ${ENV_FILE} \
+  -p 127.0.0.1:8080:8080 \
+  ${IMAGE}
+ExecStop=/usr/bin/docker stop linkchat-backend
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,18 +1,11 @@
 import mongoose from 'mongoose';
 import { RoomModel } from '../models/Room.js';
-import { MessageModel } from '../models/Message.js';
-import { RoomBannerAssignmentModel } from '../models/RoomBannerAssignment.js';
-import { getRedisClient, isRedisAvailable } from '../config/redis.js';
-import { deleteRoomFiles } from './gcsService.js';
 import { logger } from '../utils/logger.js';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
-import { Server } from 'socket.io';
-import { clearRoomModeration } from './roomModerationService.js';
-import { clearSlowModeForRoom } from './slowModeService.js';
-import { clearRoomReceipts } from './readReceiptService.js';
-import { recordRoomVanished } from './dailyStatsService.js';
+import { purgeRoom } from './roomPurgeService.js';
 import { getSettingsSync } from './adminSettingsService.js';
+import { recordJobRun } from './jobHealthService.js';
 
 // Auto-vanish runs every 5 minutes for timely processing
 const AUTO_VANISH_INTERVAL_MS = parseInt(process.env.AUTO_VANISH_INTERVAL_MS || '300000', 10); // 5 minutes default
@@ -35,74 +28,23 @@ const calculateAutoVanishAt = (lockedAt: Date): Date => {
 };
 
 /**
- * Permanently delete a room and all its associated data
+ * Permanently delete a room and all its associated data.
+ *
+ * Delegates to the canonical purge. The hand-rolled version this replaced
+ * cleared moderation/slow-mode/receipts but not screen-share state, the room
+ * cache, the socket cache, the metrics gauge or the pending timers — and it
+ * never disconnected the sockets, so participants stayed connected to a room
+ * whose documents had already been deleted.
  */
 const permanentlyDeleteRoom = async (roomCode: string): Promise<void> => {
-  try {
-    // 1. Delete files from storage (GCS or local)
-    try {
-      await deleteRoomFiles(roomCode);
-      logger.debug(`Deleted files for room ${roomCode}`);
-    } catch (fileError: any) {
-      logger.warn(`Failed to delete files for room ${roomCode} (non-critical)`, {
-        error: fileError instanceof Error ? fileError.message : String(fileError),
-      });
-      // Continue with deletion even if file deletion fails
-    }
+  const result = await purgeRoom(roomCode, {
+    reason: 'This room has been closed and its data removed.',
+    trigger: 'auto-vanish',
+    event: 'room_vanished',
+  });
 
-    // 2. Delete all messages
-    const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
-    logger.debug(`Deleted ${messageDeleteResult.deletedCount} messages from room ${roomCode}`);
-
-    // 2b. Drop this room's sponsor-banner assignment, if any. The banner ASSET itself is a
-    // reusable library item that may be assigned to other rooms too, so it's left untouched.
-    await RoomBannerAssignmentModel.deleteOne({ roomCode }).catch((assignmentError: unknown) => {
-      logger.warn(`Failed to delete banner assignment for room ${roomCode} (non-critical)`, {
-        error: assignmentError instanceof Error ? assignmentError.message : String(assignmentError),
-      });
-    });
-
-    // 3. Delete the room
-    const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
-    if (roomDeleteResult.deletedCount === 0) {
-      logger.warn(`Room ${roomCode} was already deleted`);
-    } else {
-      logger.info(`Deleted room ${roomCode}`);
-      recordRoomVanished('auto').catch(() => {});
-    }
-
-    // 3b. Clear in-memory per-room state
-    clearRoomModeration(roomCode);
-    clearSlowModeForRoom(roomCode);
-    clearRoomReceipts(roomCode);
-
-    // 4. Clean up Redis if available
-    const redis = getRedisClient();
-    if (redis && isRedisAvailable()) {
-      try {
-        // Use the room's member set as a reverse index instead of scanning
-        // the whole keyspace with KEYS (O(all users) and blocks Redis).
-        const userIds = await redis.smembers(`room:${roomCode}:users`);
-        for (const uid of userIds) {
-          const userRoomCode = await redis.hget(`user:${uid}`, 'roomCode');
-          if (userRoomCode === roomCode) {
-            await redis.del(`user:${uid}`);
-          }
-        }
-        await redis.del(`room:${roomCode}:users`);
-        logger.debug(`Cleaned up Redis data for room ${roomCode}`);
-      } catch (redisError: any) {
-        logger.warn('Redis cleanup failed (non-critical)', {
-          error: redisError instanceof Error ? redisError.message : String(redisError),
-        });
-      }
-    }
-  } catch (error: any) {
-    logger.error(`Error permanently deleting room ${roomCode}`, {
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
-    });
-    throw error;
+  if (!result.roomDeleted) {
+    logger.warn(`Room ${roomCode} was already deleted`);
   }
 };
 
@@ -299,7 +241,7 @@ export const startAutoVanishWorker = (): NodeJS.Timeout => {
   });
 
   // Run auto-vanish check immediately, then on interval
-  processAutoVanish().catch((error) => {
+  recordJobRun('auto-vanish', processAutoVanish).catch((error) => {
     logger.error('Initial auto-vanish check failed', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -307,7 +249,7 @@ export const startAutoVanishWorker = (): NodeJS.Timeout => {
 
   // Set up interval for regular checks
   return setInterval(() => {
-    processAutoVanish().catch((error) => {
+    recordJobRun('auto-vanish', processAutoVanish).catch((error) => {
       logger.error('Auto-vanish check failed', {
         error: error instanceof Error ? error.message : String(error),
       });

@@ -20,7 +20,14 @@ const roomCache = new Map();
 const cacheRoom = (code, room) => {
     roomCache.set(code, { room, expiresAt: Date.now() + ROOM_CACHE_TTL_MS });
 };
-const invalidateRoomCache = (code) => {
+/**
+ * Exported because the room purge path must evict this synchronously. A cached
+ * entry outliving its room isn't just stale-read latency: room codes are
+ * recycled from a small patterned space, so a purge that leaves the entry
+ * behind can serve the previous tenant's room object (ownerId, plan, lock
+ * state) to the next room issued that code.
+ */
+export const invalidateRoomCache = (code) => {
     roomCache.delete(code);
 };
 /**
@@ -91,6 +98,15 @@ export const createRoom = async (data) => {
             ownerUserId: data?.ownerUserId,
         });
         await room.save();
+        const roomObject = room.toObject();
+        // Room codes are recycled from a small patterned keyspace, so this code
+        // may still hold a stale cache entry from whatever room previously held
+        // it (purge invalidates on delete, but only closes that race, it doesn't
+        // guarantee zero overlap). Overwriting the cache here — with the room we
+        // just verified is the sole owner of `code` via the DB's unique index —
+        // makes creation self-healing: the very next getRoomByCode read is
+        // guaranteed to see this room, never a leftover previous tenant.
+        cacheRoom(code, roomObject);
         // Durable counters — Room documents are TTL-deleted a short time after
         // expiry (see Room.ts's expireAfterSeconds index), so "Total Rooms
         // (Lifetime)" and "Rooms Created Today" can't be answered correctly by
@@ -98,7 +114,7 @@ export const createRoom = async (data) => {
         incrementGlobalStat('totalRoomsLifetime').catch(() => { });
         recordRoomCreated().catch(() => { });
         logger.debug('Room created', { code, slug, expiresAt: expiresAt.toISOString() });
-        return room.toObject();
+        return roomObject;
     }
     catch (error) {
         // Check for Mongoose validation errors
@@ -115,9 +131,13 @@ export const createRoom = async (data) => {
                 error: error.message,
                 keyPattern: error.keyPattern
             });
-            // Retry once for duplicate code
-            if (error.keyPattern?.code) {
-                logger.info('Retrying room creation due to duplicate code');
+            // Retry with a fresh code+slug for a duplicate on either field. A
+            // duplicate `slug` here can only happen from the same race as a
+            // duplicate `code` (slug always embeds the code), so whichever one
+            // Mongo happens to report, the fix is identical: try again from
+            // scratch rather than surfacing a spurious failure to the client.
+            if (error.keyPattern?.code || error.keyPattern?.slug) {
+                logger.info('Retrying room creation due to duplicate code/slug', { keyPattern: error.keyPattern });
                 return createRoom(data); // Recursive retry
             }
             throw new Error(`Duplicate entry: ${Object.keys(error.keyPattern || {})[0] || 'unknown field'}`);
@@ -133,8 +153,13 @@ export const createRoom = async (data) => {
 };
 export const getRoomByCode = async (code) => {
     const cached = roomCache.get(code);
-    if (cached && cached.expiresAt > Date.now()) {
-        return cached.room;
+    if (cached) {
+        if (cached.expiresAt > Date.now()) {
+            return cached.room;
+        }
+        // Evict rather than just ignoring it — a stale entry that's only skipped
+        // stays in the Map forever, holding a full Room object per code.
+        roomCache.delete(code);
     }
     // Wait for database connection if not ready
     if (mongoose.connection.readyState !== 1) {

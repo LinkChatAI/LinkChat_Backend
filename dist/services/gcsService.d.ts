@@ -49,5 +49,16 @@ export declare const isGcsHealthy: () => boolean;
  * Delete files for a specific room.
  * Failures are logged but never propagated.
  */
-export declare const deleteRoomFiles: (roomCode: string) => Promise<void>;
+export declare const deleteRoomFiles: (roomCode: string) => Promise<{
+    gcs: number;
+    local: boolean;
+}>;
+/**
+ * Whether any file bytes remain for a room, across both backends. Used by the
+ * cleanup verifier to assert a purge actually left nothing behind.
+ */
+export declare const countRoomFiles: (roomCode: string) => Promise<{
+    gcs: number;
+    local: number;
+}>;
 //# sourceMappingURL=gcsService.d.ts.map

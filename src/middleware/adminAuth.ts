@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
+import { recordSecurityEvent } from '../services/serverMonitoringService.js';
 import crypto from 'crypto';
 
 export interface AdminRequest extends Request {
@@ -59,10 +60,16 @@ export const authenticateAdmin = async (
 
   // Validate admin secret
   if (!adminSecret || adminSecret !== env.ADMIN_SECRET) {
-    logger.warn('Unauthorized admin access attempt', { 
+    logger.warn('Unauthorized admin access attempt', {
       ip: clientIp,
       userAgent: req.get('user-agent'),
       endpoint: req.path,
+    });
+    void recordSecurityEvent({
+      ip: clientIp,
+      type: 'admin_auth_fail',
+      endpoint: req.path,
+      userAgent: req.get('user-agent'),
     });
     res.status(401).json({ error: 'Unauthorized' });
     return;
@@ -70,9 +77,15 @@ export const authenticateAdmin = async (
 
   // Check IP whitelist (if configured)
   if (!isIpWhitelisted(clientIp)) {
-    logger.warn('Admin access from non-whitelisted IP', { 
+    logger.warn('Admin access from non-whitelisted IP', {
       ip: clientIp,
       endpoint: req.path,
+    });
+    void recordSecurityEvent({
+      ip: clientIp,
+      type: 'admin_ip_blocked',
+      endpoint: req.path,
+      userAgent: req.get('user-agent'),
     });
     res.status(403).json({ error: 'Access denied from this IP' });
     return;
@@ -85,10 +98,11 @@ export const authenticateAdmin = async (
   // Validate session (optional)
   const sessionValid = await validateAdminSession(adminId, sessionId);
   if (!sessionValid && sessionId) {
-    logger.warn('Invalid admin session', { 
+    logger.warn('Invalid admin session', {
       adminId,
       ip: clientIp,
     });
+    void recordSecurityEvent({ ip: clientIp, type: 'admin_session_invalid', endpoint: req.path });
     res.status(401).json({ error: 'Invalid session' });
     return;
   }

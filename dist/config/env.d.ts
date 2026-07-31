@@ -34,6 +34,16 @@ interface EnvConfig {
     RAZORPAY_WEBHOOK_SECRET?: string;
     /** Comma-separated emails granted Super Admin Ghost Mode (invisible room monitoring). Verified server-side only. */
     GHOST_MODE_ADMIN_EMAILS: string;
+    /**
+     * When false, index.ts skips starting the in-process setInterval workers
+     * (cleanup, auto-vanish, subscription-expiry) at boot. Use this once those
+     * jobs are driven externally instead (e.g. Cloud Scheduler hitting
+     * POST /api/admin/maintenance/run) so the instance no longer needs a
+     * continuously-running timer to stay correct, and can be allowed to fully
+     * scale to zero between requests. Defaults to true — existing deployments
+     * and local/docker-compose dev are unaffected until this is set.
+     */
+    ENABLE_IN_PROCESS_TIMERS: boolean;
 }
 export declare const env: EnvConfig;
 export {};

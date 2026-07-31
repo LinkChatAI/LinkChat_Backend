@@ -3,7 +3,7 @@ import { MessageModel } from '../models/Message.js';
 import { UserVisitModel } from '../models/UserVisit.js';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { getSelfHealingGlobalStat, getOrCreateGlobalStat } from '../utils/globalStats.js';
-import { getLiveUserCountsForRooms, sumLiveUserCounts } from './roomPresenceService.js';
+import { getLiveUserCountsForRooms, sumLiveUserCounts, getPlatformUsersOnline } from './roomPresenceService.js';
 import { logger } from '../utils/logger.js';
 import {
   getRoomsCreatedSeries,
@@ -409,8 +409,17 @@ export const computeDashboardInsights = async (): Promise<AdminInsightsBundle> =
   // ---- System Signals / System (unchanged — already cheap, in-memory) ----
   const { getTodayMetrics } = await import('./platformMetricsService.js');
   const platformMetrics = getTodayMetrics();
+  // Raw connection count — a separate, intentionally "technical" metric from
+  // usersOnline below (includes ghost/admin sockets and multi-tab duplicates,
+  // and only reflects this one instance). Shown on the dashboard as its own
+  // card; don't conflate the two.
   const socketConnectionsLive = io ? io.sockets.sockets.size : 0;
-  const usersOnline = io ? (io.engine?.clientsCount || io.sockets.sockets.size || 0) : 0;
+  // Ghost-excluded, deduped-by-user, cross-instance-accurate — see
+  // getPlatformUsersOnline's doc comment for why this replaced the previous
+  // io.sockets.sockets.size-based formula (it double-counted multi-tab users,
+  // counted Ghost Mode admins and the admin dashboard's own sockets, and only
+  // reflected whichever single instance handled the request).
+  const usersOnline = await getPlatformUsersOnline();
   const peakConcurrentUsersToday = await getPeakConcurrentToday();
 
   return {

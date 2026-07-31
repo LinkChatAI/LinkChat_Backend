@@ -32,8 +32,24 @@ const RoomSchema = new Schema<IRoom>(
   { timestamps: true }
 );
 
-// TTL index for automatic expiration
-RoomSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+// NOTE: there is deliberately NO TTL index on expiresAt.
+//
+// A TTL index deletes the Room document from inside mongod, running zero
+// application code. Everything else a room owns — GCS/local file objects,
+// Redis keys, per-instance in-memory state, connected sockets — is cleaned up
+// by application code keyed off finding the expired Room. Mongo's TTL monitor
+// sweeps every 60s, so it always won the race against the cleanup sweep and
+// deleted the room out from under it; the sweep then found nothing to do and
+// every other resource was orphaned.
+//
+// Expiry is now driven by cleanupService.cleanupExpiredRooms, which finds
+// expired rooms and runs the full purgeRoom teardown. A plain (non-TTL) index
+// on expiresAt keeps that query fast.
+//
+// If you re-add expireAfterSeconds here, room file/Redis/memory cleanup
+// silently stops. Existing deployments must drop the legacy index — see
+// scripts/drop-room-ttl-index.mjs.
+RoomSchema.index({ expiresAt: 1 });
 // Compound index for public room queries
 RoomSchema.index({ slug: 1, isPublic: 1 });
 // Index for expiration checks

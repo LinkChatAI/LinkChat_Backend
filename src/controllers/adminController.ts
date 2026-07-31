@@ -4,14 +4,14 @@ import { RoomModel } from '../models/Room.js';
 import { MessageModel } from '../models/Message.js';
 import { UserVisitModel } from '../models/UserVisit.js';
 import { logger } from '../utils/logger.js';
-import { getRedisClient, isRedisAvailable } from '../config/redis.js';
+import { isRedisAvailable } from '../config/redis.js';
 import { AdminRequest } from '../middleware/adminAuth.js';
 import { invalidateDashboardCache } from '../middleware/adminCache.js';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { adminVanishRoom } from '../services/adminRoomService.js';
 import { getOrCreateGlobalStat, getSelfHealingGlobalStat } from '../utils/globalStats.js';
 import { getDashboardInsightsCached } from '../services/adminInsightsService.js';
-import { getLiveUserCountsForRooms } from '../services/roomPresenceService.js';
+import { getLiveUserCountsForRooms, getPlatformUsersOnline } from '../services/roomPresenceService.js';
 
 /**
  * Get start of day in server timezone (not UTC)
@@ -119,9 +119,7 @@ export const getVanishedToday = async (req: AdminRequest, res: Response): Promis
 
 export const getUsersOnline = async (req: AdminRequest, res: Response): Promise<void> => {
   try {
-    const redis = getRedisClient();
-
-    if (!redis || !isRedisAvailable()) {
+    if (!isRedisAvailable()) {
       res.json({
         usersOnline: 0,
         note: 'Redis not available. Online user count requires Redis for real-time tracking.'
@@ -129,28 +127,7 @@ export const getUsersOnline = async (req: AdminRequest, res: Response): Promise<
       return;
     }
 
-    // Non-blocking cursor scan (KEYS blocks Redis's single-threaded event
-    // loop for every other caller — including the join/leave hot path —
-    // for the duration of the scan) + a pipelined SMEMBERS batch instead of
-    // one round trip per room. Same unique-user-dedup semantics as before.
-    const keys: string[] = [];
-    const stream = redis.scanStream({ match: 'room:*:users', count: 100 });
-    for await (const chunk of stream as AsyncIterable<string[]>) {
-      keys.push(...chunk);
-    }
-
-    const userIds = new Set<string>();
-    if (keys.length > 0) {
-      const pipeline = redis.pipeline();
-      keys.forEach((key: string) => pipeline.smembers(key));
-      const results = await pipeline.exec();
-      results?.forEach((result: [Error | null, unknown]) => {
-        const [, members] = result;
-        (members as string[] | undefined)?.forEach((userId: string) => userIds.add(userId));
-      });
-    }
-
-    res.json({ usersOnline: userIds.size });
+    res.json({ usersOnline: await getPlatformUsersOnline() });
   } catch (error: any) {
     logger.error('Error getting users online', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to get users online' });
@@ -293,10 +270,7 @@ export const getDebugStats = async (req: AdminRequest, res: Response): Promise<v
       UserVisitModel.aggregate([{ $group: { _id: '$userId' } }, { $count: 'count' }]).allowDiskUse(true).then(r => r[0]?.count || 0),
       getOrCreateGlobalStat('totalVisitsLifetime'),
       UserVisitModel.countDocuments({ joinedAt: { $gte: startOfDay, $lte: endOfDay } }),
-      (() => {
-        const io = getIoInstance();
-        return io ? (io.engine?.clientsCount || io.sockets.sockets.size || 0) : 0;
-      })()
+      getPlatformUsersOnline(),
     ]);
 
     res.json({
@@ -348,7 +322,7 @@ export const getDebugStats = async (req: AdminRequest, res: Response): Promise<v
         },
         usersOnline: {
           count: usersOnline,
-          query: 'io.engine.clientsCount or io.sockets.sockets.size'
+          query: 'getPlatformUsersOnline() — unique userIds across all room:{code}:users Redis sets (ghost-excluded, deduped, cross-instance)'
         }
       },
       database: {

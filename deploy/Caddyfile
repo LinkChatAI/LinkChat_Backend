@@ -1,0 +1,13 @@
+# Terminates TLS for the backend directly on the VM — no HTTPS Load Balancer
+# needed at this scale (an LB's own forwarding-rule cost would eat into the
+# savings this migration is for). Caddy auto-provisions and renews a Let's
+# Encrypt certificate for the domain below the first time it starts, as long
+# as DNS already points at this VM's external IP and ports 80/443 are open.
+#
+# Point both REST (/api) and the WebSocket (/ws) at the same place — it's one
+# process either way. Update the domain to whatever you point at this VM
+# (e.g. a new "ws.linkchat.in" A/AAAA record, or reuse the existing backend
+# hostname once Cloud Run is no longer serving it).
+ws.linkchat.in {
+	reverse_proxy localhost:8080
+}

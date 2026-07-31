@@ -4,6 +4,8 @@ import { logger } from '../utils/logger.js';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { invalidateDashboardCache } from '../middleware/adminCache.js';
 import { getDashboardInsightsCached } from '../services/adminInsightsService.js';
+import { getPlatformUsersOnline } from '../services/roomPresenceService.js';
+import { recordSecurityEvent, getLatestSnapshot } from '../services/serverMonitoringService.js';
 
 const ADMIN_ROOM = 'admin:insights';
 const getRedis = () => getRedisClient();
@@ -102,13 +104,36 @@ export const startPeriodicAdminUpdates = (io: Server): void => {
       // Keep the cross-instance presence flag alive while admins are connected
       await refreshAdminPresence();
 
-      // Get real-time users online from Socket.IO
-      const usersOnline = io ? (io.engine?.clientsCount || io.sockets.sockets.size || 0) : 0;
+      // Ghost-excluded, deduped-by-user, cross-instance-accurate — see
+      // getPlatformUsersOnline's doc comment. socketConnectionsLive is
+      // deliberately the separate raw connection count (includes ghost/admin
+      // sockets and multi-tab duplicates) — a technical metric shown on its
+      // own dashboard card, not a substitute for usersOnline.
+      const usersOnline = await getPlatformUsersOnline();
+      const socketConnectionsLive = io.engine?.clientsCount || io.sockets.sockets.size || 0;
+
+      // Republishes the most recent server-monitoring snapshot (already
+      // computed on its own 60s interval — see serverMonitoringService.ts)
+      // rather than sampling anything new here, so this stays as cheap as it
+      // was before: one extra object spread onto an emit that already fires
+      // every 7s.
+      const snapshot = getLatestSnapshot();
+      const monitoring = snapshot
+        ? {
+            cpuPct: snapshot.cpuPct,
+            memPct: snapshot.memPct,
+            eventLoopLagMs: snapshot.eventLoopLagMs,
+            connectedSockets: snapshot.connectedSockets,
+            mongoOk: snapshot.mongoOk,
+            redisOk: snapshot.redisOk,
+          }
+        : undefined;
 
       // Emit lightweight real-time update (only usersOnline, not full insights)
       io.to(ADMIN_ROOM).emit('admin:stats_update', {
         usersOnline,
-        socketConnectionsLive: usersOnline,
+        socketConnectionsLive,
+        monitoring,
         timestamp: new Date().toISOString()
       });
     } catch (error: any) {
@@ -141,6 +166,11 @@ export const handleAdminSocketConnection = (io: Server, socket: Socket): void =>
     logger.warn('Unauthorized admin socket connection attempt', {
       ip: socket.handshake.address,
       socketId: socket.id
+    });
+    void recordSecurityEvent({
+      ip: socket.handshake.address || 'unknown',
+      type: 'admin_socket_auth_fail',
+      userAgent: socket.handshake.headers['user-agent'],
     });
     socket.emit('error', { message: 'Unauthorized' });
     socket.disconnect();

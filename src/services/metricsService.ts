@@ -13,6 +13,17 @@ const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
 let connectedSockets = 0;
+let messagesSentTotal = 0;
+let bytesInTotal = 0;
+let bytesOutTotal = 0;
+const apiRequestsByClass: Record<'2xx' | '3xx' | '4xx' | '5xx', number> = {
+  '2xx': 0,
+  '3xx': 0,
+  '4xx': 0,
+  '5xx': 0,
+};
+let adminCacheHits = 0;
+let adminCacheMisses = 0;
 
 const connectedSocketsGauge = new client.Gauge({
   name: 'chat_connected_sockets',
@@ -37,6 +48,43 @@ const broadcastLatencyHistogram = new client.Histogram({
   name: 'chat_message_broadcast_latency_ms',
   help: 'Time from receiving sendMessage to completing the room broadcast emit',
   buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+  registers: [register],
+});
+
+// Approximate application-level payload bytes (JSON message size, times
+// recipient count on the way out) — NOT raw socket/TLS wire bytes. Cheap to
+// compute at points we already touch for latency tracking, and good enough
+// for a "bandwidth" order-of-magnitude on the monitoring dashboard.
+const bytesInCounter = new client.Counter({
+  name: 'chat_bytes_in_total',
+  help: 'Approximate application-level bytes received (message payload sizes)',
+  registers: [register],
+});
+
+const bytesOutCounter = new client.Counter({
+  name: 'chat_bytes_out_total',
+  help: 'Approximate application-level bytes sent (message payload size x recipients)',
+  registers: [register],
+});
+
+// Labeled only by status-class (2xx/3xx/4xx/5xx), never by path — a per-path
+// label would be unbounded cardinality across room-scoped routes.
+const apiRequestsCounter = new client.Counter({
+  name: 'api_requests_total',
+  help: 'Total HTTP requests handled, labeled by response status class',
+  labelNames: ['statusClass'] as const,
+  registers: [register],
+});
+
+const adminCacheHitCounter = new client.Counter({
+  name: 'admin_cache_hit_total',
+  help: 'Admin dashboard Redis response-cache hits',
+  registers: [register],
+});
+
+const adminCacheMissCounter = new client.Counter({
+  name: 'admin_cache_miss_total',
+  help: 'Admin dashboard Redis response-cache misses',
   registers: [register],
 });
 
@@ -68,16 +116,84 @@ export const setRoomParticipantCount = (roomCode: string, count: number): void =
   roomParticipantsGauge.set({ room: roomCode }, count);
 };
 
+/**
+ * Drop a room's gauge series. `room` is a high-cardinality label — one series
+ * per room code, retained by prom-client forever unless explicitly removed —
+ * so without this every room ever created stays in the registry and is
+ * re-serialized on every /metrics scrape.
+ */
+export const removeRoomMetrics = (roomCode: string): void => {
+  roomParticipantsGauge.remove({ room: roomCode });
+};
+
 export const recordMessageSent = (): void => {
   messagesSentCounter.inc();
+  messagesSentTotal += 1;
 };
 
 export const observeBroadcastLatencyMs = (ms: number): void => {
   broadcastLatencyHistogram.observe(ms);
 };
 
+export const recordBytesIn = (bytes: number): void => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return;
+  bytesInCounter.inc(bytes);
+  bytesInTotal += bytes;
+};
+
+export const recordBytesOut = (bytes: number): void => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return;
+  bytesOutCounter.inc(bytes);
+  bytesOutTotal += bytes;
+};
+
+export const recordApiRequest = (statusCode: number): void => {
+  const statusClass = `${Math.floor(statusCode / 100)}xx` as keyof typeof apiRequestsByClass;
+  if (!(statusClass in apiRequestsByClass)) return;
+  apiRequestsCounter.inc({ statusClass });
+  apiRequestsByClass[statusClass] += 1;
+};
+
+export const recordAdminCacheHit = (): void => {
+  adminCacheHitCounter.inc();
+  adminCacheHits += 1;
+};
+
+export const recordAdminCacheMiss = (): void => {
+  adminCacheMissCounter.inc();
+  adminCacheMisses += 1;
+};
+
 export const getMetricsText = (): Promise<string> => register.metrics();
 export const getMetricsContentType = (): string => register.contentType;
+
+/**
+ * JSON snapshot of the headline counters for the Server Monitoring REST API —
+ * avoids parsing the Prometheus text-exposition format for a handful of
+ * numbers the dashboard already needs on every /overview poll.
+ */
+export const getMetricsSummaryJson = () => {
+  const totalCacheLookups = adminCacheHits + adminCacheMisses;
+
+  return {
+    connectedSockets,
+    messagesSentTotal,
+    eventLoopLagMs: Math.round(eventLoopDelay.mean / 1e6),
+    bytesInTotal,
+    bytesOutTotal,
+    // Cumulative since process start — callers wanting a "current" error rate
+    // should diff this between two points in time (see
+    // serverMonitoringService.ts's rolling apiErrorRatePct), not divide these
+    // directly, which would report a lifetime average that a brief early
+    // error burst distorts forever.
+    apiRequestsByClass: { ...apiRequestsByClass },
+    adminCache: {
+      hits: adminCacheHits,
+      misses: adminCacheMisses,
+      hitRatePct: totalCacheLookups > 0 ? (adminCacheHits / totalCacheLookups) * 100 : 0,
+    },
+  };
+};
 
 export const startMetricsLogging = (intervalMs = 60000): NodeJS.Timeout => {
   return setInterval(() => {

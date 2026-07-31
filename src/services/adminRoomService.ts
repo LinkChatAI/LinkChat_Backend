@@ -1,16 +1,12 @@
 import { Server } from 'socket.io';
 import { RoomModel } from '../models/Room.js';
-import { MessageModel } from '../models/Message.js';
 import { AdminActionModel } from '../models/AdminAction.js';
-import { getRedisClient, isRedisAvailable } from '../config/redis.js';
-import { deleteRoomFiles } from './gcsService.js';
 import { logger } from '../utils/logger.js';
 import { getIoInstance } from '../socket/ioInstance.js';
 import { emitAdminInsightUpdate } from '../socket/adminHandlers.js';
-import { createMessage } from './messageService.js';
-import { clearPendingDeletionTimer } from '../socket/handlers.js';
+import { purgeRoom } from './roomPurgeService.js';
+import { clearPendingDeletionTimer } from '../socket/handlers/roomTimers.js';
 import { v4 as uuidv4 } from 'uuid';
-import { recordRoomVanished } from './dailyStatsService.js';
 
 /**
  * Admin-controlled room vanish
@@ -35,85 +31,22 @@ export const adminVanishRoom = async (
   // 1.5. Clear any pending deletion timer (explicit vanish bypasses grace period)
   clearPendingDeletionTimer(roomCode);
 
-  // 2. Broadcast system message before deletion
-  try {
-    const systemMessage = await createMessage(
-      roomCode,
-      'system',
-      'System',
-      'This room has been vanished by an administrator.',
-      'text'
-    );
-    io.to(roomCode).emit('newMessage', systemMessage);
-    logger.info(`Broadcast system message for admin-vanished room ${roomCode}`);
-    
-    // Small delay to ensure message is received
-    await new Promise(resolve => setTimeout(resolve, 500));
-  } catch (msgError: any) {
-    logger.warn('Failed to broadcast system message (non-critical)', {
-      error: msgError instanceof Error ? msgError.message : String(msgError),
-    });
-    // Continue with room deletion even if system message fails
-  }
-
-  // 3. Emit room_vanished event to all clients
-  io.to(roomCode).emit('room_vanished', {
+  // 2-8. Full teardown. This path previously cleared no in-memory state at all
+  // — screen-share, moderation (mute/kick), slow-mode, receipts, room cache and
+  // the metrics gauge all survived an admin vanish, and the kick list in
+  // particular then blocked those users from the next room to reuse the code.
+  const purgeResult = await purgeRoom(roomCode, {
     reason: 'This room has been vanished by an administrator.',
-    roomId: roomCode,
-    vanishedBy: 'admin',
+    trigger: 'admin',
+    event: 'room_vanished',
+    actorId: 'admin',
+    systemMessage: 'This room has been vanished by an administrator.',
   });
 
-  // 4. Force disconnect all sockets in that room
-  const socketsInRoom = await io.in(roomCode).fetchSockets();
-  for (const socketInRoom of socketsInRoom) {
-    socketInRoom.leave(roomCode);
-  }
-  io.in(roomCode).disconnectSockets(true);
+  const messageDeleteResult = { deletedCount: purgeResult.messagesDeleted };
 
-  // 5. Delete files from storage (GCS or local)
-  try {
-    await deleteRoomFiles(roomCode);
-    logger.info(`Deleted files for admin-vanished room ${roomCode}`);
-  } catch (fileError: any) {
-    logger.warn(`Failed to delete files for room ${roomCode} (non-critical)`, {
-      error: fileError instanceof Error ? fileError.message : String(fileError),
-    });
-    // Continue with deletion even if file deletion fails
-  }
-
-  // 6. Delete all messages
-  const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
-  logger.info(`Deleted ${messageDeleteResult.deletedCount} messages from admin-vanished room ${roomCode}`);
-
-  // 7. Delete the room
-  const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
-  if (roomDeleteResult.deletedCount === 0) {
+  if (!purgeResult.roomDeleted) {
     logger.warn(`Room ${roomCode} was already deleted`);
-  } else {
-    logger.info(`Admin-vanished room ${roomCode}`);
-    recordRoomVanished('admin').catch(() => {});
-  }
-
-  // 8. Clean up Redis if available
-  const redis = getRedisClient();
-  if (redis && isRedisAvailable()) {
-    try {
-      // Use the room's member set as a reverse index instead of scanning
-      // the whole keyspace with KEYS (O(all users) and blocks Redis).
-      const userIds = await redis.smembers(`room:${roomCode}:users`);
-      for (const uid of userIds) {
-        const userRoomCode = await redis.hget(`user:${uid}`, 'roomCode');
-        if (userRoomCode === roomCode) {
-          await redis.del(`user:${uid}`);
-        }
-      }
-      await redis.del(`room:${roomCode}:users`);
-      logger.debug(`Cleaned up Redis data for admin-vanished room ${roomCode}`);
-    } catch (redisError: any) {
-      logger.warn('Redis cleanup failed (non-critical)', {
-        error: redisError instanceof Error ? redisError.message : String(redisError),
-      });
-    }
   }
 
   // 9. Log admin action to audit log

@@ -58,3 +58,7 @@ logs
 .temp
 tmp
 
+# VM deployment scaffolding (systemd/Caddy/startup-script) — not part of the
+# container image; copied to the Compute Engine VM separately.
+deploy
+

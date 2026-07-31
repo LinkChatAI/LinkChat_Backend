@@ -26,6 +26,10 @@ const RATE_LIMITS = {
         windowMs: 60 * 1000, // 1 minute
         maxRequests: 10, // 10 action requests per minute
     },
+    adminMonitoring: {
+        windowMs: 60 * 1000, // 1 minute
+        maxRequests: 30, // dashboard-refresh cadence for the Server Monitoring panel
+    },
     contactSubmit: {
         windowMs: 60 * 60 * 1000, // 1 hour
         maxRequests: 5, // 5 submissions per hour per IP (additional email-based limit in controller)
@@ -49,6 +53,29 @@ const RATE_LIMITS = {
     sessionExchange: {
         windowMs: 60 * 1000, // 1 minute
         maxRequests: 20, // generous enough for periodic re-bridging across tabs, tight enough against abuse of a security-sensitive endpoint
+    },
+    // The four limits below back what used to be raw `express-rate-limit`
+    // instances in index.ts, each with its own in-memory MemoryStore — with
+    // Cloud Run running multiple instances, an in-memory store only limits per
+    // instance, so a client could get up to N× the intended limit by fanning
+    // requests across instances. Same thresholds, Redis-backed like everything
+    // else in this file (fails open if Redis is down, same as every other key
+    // here — see the try/catch in `rateLimiter` below).
+    apiGlobal: {
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        maxRequests: 100,
+    },
+    roomCreationHourly: {
+        windowMs: 60 * 60 * 1000, // 1 hour
+        maxRequests: 10,
+    },
+    uploadUrlGlobal: {
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        maxRequests: 100,
+    },
+    linkPreview: {
+        windowMs: 60 * 1000, // 1 minute
+        maxRequests: 30,
     },
     default: {
         windowMs: 60 * 1000, // 1 minute

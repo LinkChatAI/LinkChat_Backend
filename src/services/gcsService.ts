@@ -225,36 +225,77 @@ export const isGcsHealthy = (): boolean => gcsHealthStatus === 'healthy';
  * Delete files for a specific room.
  * Failures are logged but never propagated.
  */
-export const deleteRoomFiles = async (roomCode: string): Promise<void> => {
-  const bucket = getBucket();
+export const deleteRoomFiles = async (roomCode: string): Promise<{ gcs: number; local: boolean }> => {
+  const result = { gcs: 0, local: false };
 
-  if (bucket && gcsHealthStatus === 'healthy') {
+  // Both backends are swept unconditionally, never either/or. Uploads fall back
+  // to local disk whenever GCS is unhealthy (see uploadFile), so a single room
+  // can have objects in both places. Branching on *current* health at delete
+  // time would strand whichever backend happens not to be selected right now.
+  const bucket = getBucket();
+  if (bucket) {
     try {
       const [files] = await bucket.getFiles({ prefix: `rooms/${roomCode}/` });
       if (files.length > 0) {
         await Promise.all(
           files.map((file) =>
-            file.delete().catch((err) =>
-              logger.warn(`Failed to delete GCS file: ${file.name}`, { error: err })
-            )
+            file
+              .delete()
+              .then(() => {
+                result.gcs++;
+              })
+              .catch((err) =>
+                logger.warn(`Failed to delete GCS file: ${file.name}`, { error: err })
+              )
           )
         );
-        logger.info(`Deleted ${files.length} GCS files for room ${roomCode}`);
+        logger.info(`Deleted ${result.gcs} GCS files for room ${roomCode}`);
       }
     } catch (error) {
       logger.warn(`GCS deleteRoomFiles failed for room ${roomCode} (non-critical)`, {
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  } else {
+  }
+
+  try {
+    const roomDir = path.join(LOCAL_UPLOAD_DIR, 'rooms', roomCode);
+    await fs.rm(roomDir, { recursive: true, force: true });
+    result.local = true;
+  } catch (error) {
+    logger.warn(`Could not delete local files for room ${roomCode}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return result;
+};
+
+/**
+ * Whether any file bytes remain for a room, across both backends. Used by the
+ * cleanup verifier to assert a purge actually left nothing behind.
+ */
+export const countRoomFiles = async (roomCode: string): Promise<{ gcs: number; local: number }> => {
+  const counts = { gcs: 0, local: 0 };
+
+  const bucket = getBucket();
+  if (bucket) {
     try {
-      const roomDir = path.join(LOCAL_UPLOAD_DIR, 'rooms', roomCode);
-      await fs.rm(roomDir, { recursive: true, force: true });
-      logger.info(`Deleted local files for room ${roomCode}`);
-    } catch (error) {
-      logger.warn(`Could not delete local files for room ${roomCode}`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      const [files] = await bucket.getFiles({ prefix: `rooms/${roomCode}/` });
+      counts.gcs = files.length;
+    } catch {
+      // Bucket unreachable — report -1 so the verifier treats this backend as
+      // unverified rather than silently counting it as clean.
+      counts.gcs = -1;
     }
   }
+
+  try {
+    const entries = await fs.readdir(path.join(LOCAL_UPLOAD_DIR, 'rooms', roomCode));
+    counts.local = entries.length;
+  } catch {
+    counts.local = 0; // ENOENT means the directory is gone, which is what we want
+  }
+
+  return counts;
 };

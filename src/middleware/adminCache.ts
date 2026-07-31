@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { getRedisClient, isRedisAvailable } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
+import { recordAdminCacheHit, recordAdminCacheMiss } from '../services/metricsService.js';
 
 const getRedis = () => getRedisClient();
 
@@ -40,6 +41,7 @@ export const cacheAdminResponse = (options: CacheOptions = {}) => {
       const cached = await redis.get(cacheKey);
       if (cached) {
         const data = JSON.parse(cached);
+        recordAdminCacheHit();
         res.setHeader('X-Cache', 'HIT');
         res.setHeader('X-Cache-Key', cacheKey);
         res.json(data);
@@ -58,6 +60,7 @@ export const cacheAdminResponse = (options: CacheOptions = {}) => {
             });
           });
         }
+        recordAdminCacheMiss();
         res.setHeader('X-Cache', 'MISS');
         res.setHeader('X-Cache-Key', cacheKey);
         return originalJson(body);

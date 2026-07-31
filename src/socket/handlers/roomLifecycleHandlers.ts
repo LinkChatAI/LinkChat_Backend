@@ -9,36 +9,31 @@ import { MessageModel } from '../../models/Message.js';
 import { RoomModel } from '../../models/Room.js';
 import { emitAdminInsightUpdate } from '../adminHandlers.js';
 import { HandlerContext } from './types.js';
-import { clearScreenShareState } from '../screenShareState.js';
-import { clearRoomModeration } from '../../services/roomModerationService.js';
-import { clearSlowModeForRoom } from '../../services/slowModeService.js';
-import { clearRoomReceipts } from '../../services/readReceiptService.js';
 import { getCachedRoomSockets, getCachedRoomSocketCount } from './socketCache.js';
 import { setRoomParticipantCount } from '../../services/metricsService.js';
-
-const clearAllRoomState = (roomCode: string): void => {
-  clearScreenShareState(roomCode);
-  clearRoomModeration(roomCode);
-  clearSlowModeForRoom(roomCode);
-  clearRoomReceipts(roomCode);
-};
+import { purgeRoom, isRoomPurging } from '../../services/roomPurgeService.js';
+import {
+  hasPendingDeletion,
+  clearPendingDeletionTimer,
+  setPendingDeletionTimer,
+  forgetPendingDeletionTimer,
+  hasPendingUserLeaveTimer,
+  clearPendingUserLeaveTimer,
+  setPendingUserLeaveTimer,
+  forgetPendingUserLeaveTimer,
+} from './roomTimers.js';
 import { handleScreenShareParticipantLeft, stopScreenSharePresentation } from '../screenShareService.js';
 
 const getRedis = () => getRedisClient();
 
-// Map to track pending deletion timers for rooms with disconnected admins
-const pendingDeletionTimers = new Map<string, NodeJS.Timeout>();
-
-export const hasPendingDeletion = (roomCode: string): boolean =>
-  pendingDeletionTimers.has(roomCode);
-
-export const clearPendingDeletionTimer = (roomCode: string): void => {
-  const timer = pendingDeletionTimers.get(roomCode);
-  if (timer) {
-    clearTimeout(timer);
-    pendingDeletionTimers.delete(roomCode);
-    logger.info(`Cleared pending deletion timer for room ${roomCode}`);
-  }
+// Timer registries live in ./roomTimers so the purge service can cancel them
+// without importing this module (which imports the purge service). Re-exported
+// here to keep the existing import sites working.
+export {
+  hasPendingDeletion,
+  clearPendingDeletionTimer,
+  hasPendingUserLeaveTimer,
+  clearPendingUserLeaveTimer,
 };
 
 /**
@@ -68,22 +63,6 @@ const formatGraceDuration = (minutes: number): string => {
 // the window (recovered silently or via full rejoin) never shows them as
 // having left and never frees their nickname out from under them.
 const USER_LEAVE_GRACE_MS = 20 * 60 * 1000; // 20 minutes
-const pendingUserLeaveTimers = new Map<string, NodeJS.Timeout>();
-
-const userLeaveTimerKey = (roomCode: string, userId: string): string => `${roomCode}:${userId}`;
-
-export const hasPendingUserLeaveTimer = (roomCode: string, userId: string): boolean =>
-  pendingUserLeaveTimers.has(userLeaveTimerKey(roomCode, userId));
-
-export const clearPendingUserLeaveTimer = (roomCode: string, userId: string): void => {
-  const key = userLeaveTimerKey(roomCode, userId);
-  const timer = pendingUserLeaveTimers.get(key);
-  if (timer) {
-    clearTimeout(timer);
-    pendingUserLeaveTimers.delete(key);
-    logger.info(`Cleared pending leave timer for user ${userId} in room ${roomCode}`);
-  }
-};
 
 const destroyRoomAfterGracePeriod = async (
   io: Server,
@@ -94,7 +73,7 @@ const destroyRoomAfterGracePeriod = async (
   try {
     logger.info(`Grace period expired for room ${roomCode}, destroying room`);
 
-    pendingDeletionTimers.delete(roomCode);
+    forgetPendingDeletionTimer(roomCode);
 
     const room = await getRoomByCode(roomCode);
     if (!room) {
@@ -107,66 +86,13 @@ const destroyRoomAfterGracePeriod = async (
       return;
     }
 
-    try {
-      const systemMessage = await createMessage(
-        roomCode, 'system', 'System',
-        `Host did not return within ${graceLabel}. Room has been closed.`, 'text'
-      );
-      io.to(roomCode).emit('newMessage', systemMessage);
-    } catch (msgError: any) {
-      logger.warn('Failed to broadcast system message (non-critical)', {
-        error: msgError instanceof Error ? msgError.message : String(msgError),
-      });
-    }
-
-    try {
-      const { deleteRoomFiles } = await import('../../services/gcsService.js');
-      await deleteRoomFiles(roomCode);
-    } catch (fileError: any) {
-      logger.warn('Failed to delete room files (non-critical)', {
-        error: fileError instanceof Error ? fileError.message : String(fileError),
-      });
-    }
-
-    const messageDeleteResult = await MessageModel.deleteMany({ roomCode });
-    logger.info(`Deleted ${messageDeleteResult.deletedCount} messages from room ${roomCode} after grace period`);
-
-    const roomDeleteResult = await RoomModel.deleteOne({ code: roomCode });
-    logger.info(`Deleted room ${roomCode} after grace period`, { deleted: roomDeleteResult.deletedCount });
-
-    clearAllRoomState(roomCode);
-
-    io.to(roomCode).emit('room_vanished', {
+    await purgeRoom(roomCode, {
       reason: `Host did not return within ${graceLabel}. Room has been closed.`,
-      roomId: roomCode,
-      vanishedBy: adminUserId,
+      trigger: 'host-grace-expired',
+      event: 'room_vanished',
+      actorId: adminUserId,
+      systemMessage: `Host did not return within ${graceLabel}. Room has been closed.`,
     });
-
-    // Collect user IDs BEFORE disconnecting so Redis cleanup can find them
-    const socketsInRoom = await io.in(roomCode).fetchSockets();
-    const userIdsToClean = socketsInRoom
-      .map((s: any) => s.data?.user?.userId as string | undefined)
-      .filter((id): id is string => !!id);
-
-    for (const socketInRoom of socketsInRoom) {
-      socketInRoom.leave(roomCode);
-    }
-    io.in(roomCode).disconnectSockets(true);
-
-    const redis = getRedis();
-    if (redis && isRedisAvailable()) {
-      try {
-        await redis.del(`room:${roomCode}:users`);
-        for (const uid of userIdsToClean) {
-          await redis.del(`user:${uid}`);
-        }
-        logger.info(`Cleaned up Redis data for room ${roomCode} after grace period`);
-      } catch (redisError: any) {
-        logger.warn('Redis cleanup failed (non-critical)', {
-          error: redisError instanceof Error ? redisError.message : String(redisError),
-        });
-      }
-    }
 
     emitAdminInsightUpdate(io, 'room_vanished', { roomCode }).catch(err => {
       logger.warn('Failed to emit admin insight update for room vanished', {
@@ -336,7 +262,7 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
             });
           });
         }, gracePeriodMs);
-        pendingDeletionTimers.set(capturedRoomId, timer);
+        setPendingDeletionTimer(capturedRoomId, timer);
 
         stopScreenSharePresentation(io, roomId, authUserId, 'Host left the room');
 
@@ -404,7 +330,7 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
             });
           }, gracePeriodMs);
 
-          pendingDeletionTimers.set(roomCodeForTimer, timer);
+          setPendingDeletionTimer(roomCodeForTimer, timer);
 
           io.to(roomCodeForTimer).emit('adminOffline', {
             roomId: roomCodeForTimer,
@@ -423,8 +349,23 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
           const userIdForTimer = user.userId;
           clearPendingUserLeaveTimer(roomCodeForUserTimer, userIdForTimer);
 
+          // A purge force-disconnects everyone, which lands here. Registering a
+          // 20-minute leave timer for a room that is being torn down would
+          // outlive the room — and because room codes are recycled, it would
+          // eventually fire against whichever room next holds this code.
+          //
+          // `!room` is checked alongside the purging flag on purpose: the flag
+          // is held for a short window after teardown, and the code can be
+          // reissued inside that window. If a room document exists under this
+          // code it is a DIFFERENT room, and that room's participants still
+          // need their normal grace-period handling.
+          if (isRoomPurging(roomCodeForUserTimer) && !room) {
+            user.roomCode = '';
+            return;
+          }
+
           const timer = setTimeout(() => {
-            pendingUserLeaveTimers.delete(userLeaveTimerKey(roomCodeForUserTimer, userIdForTimer));
+            forgetPendingUserLeaveTimer(roomCodeForUserTimer, userIdForTimer);
             (async () => {
               try {
                 // Guard against a still-connected second tab/device for the same
@@ -444,7 +385,7 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
             })();
           }, USER_LEAVE_GRACE_MS);
 
-          pendingUserLeaveTimers.set(userLeaveTimerKey(roomCodeForUserTimer, userIdForTimer), timer);
+          setPendingUserLeaveTimer(roomCodeForUserTimer, userIdForTimer, timer);
         }
 
         user.roomCode = '';
@@ -538,68 +479,15 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         throw new Error('Database connection not available');
       }
 
-      try {
-        const systemMessage = await createMessage(
-          targetRoomId, 'system', 'System',
-          'The owner has vanished the room.', 'text'
-        );
-        io.to(targetRoomId).emit('newMessage', systemMessage);
-      } catch (msgError: any) {
-        logger.warn('Failed to broadcast system message (non-critical)', {
-          error: msgError instanceof Error ? msgError.message : String(msgError),
-        });
-      }
-
-      try {
-        const { deleteRoomFiles } = await import('../../services/gcsService.js');
-        await deleteRoomFiles(targetRoomId);
-      } catch (fileError: any) {
-        logger.warn('Failed to delete room files (non-critical)', {
-          error: fileError instanceof Error ? fileError.message : String(fileError),
-        });
-      }
-
-      const messageDeleteResult = await MessageModel.deleteMany({ roomCode: targetRoomId });
-      logger.info(`Deleted ${messageDeleteResult.deletedCount} messages from room ${targetRoomId}`);
-
-      const roomDeleteResult = await RoomModel.deleteOne({ code: targetRoomId });
-      logger.info(`Deleted room ${targetRoomId}`, { deleted: roomDeleteResult.deletedCount });
-
-      clearAllRoomState(targetRoomId);
-
-      io.to(targetRoomId).emit('room_vanished', {
+      const purgeResult = await purgeRoom(targetRoomId, {
         reason: 'The owner has vanished the room.',
-        roomId: targetRoomId,
-        vanishedBy: user.userId,
+        trigger: 'owner',
+        event: 'room_vanished',
+        actorId: user.userId,
+        systemMessage: 'The owner has vanished the room.',
       });
 
-      // Collect user IDs BEFORE disconnecting so Redis cleanup can find them
-      const socketsInRoom = await io.in(targetRoomId).fetchSockets();
-      const userIdsToClean = socketsInRoom
-        .map((s: any) => s.data?.user?.userId as string | undefined)
-        .filter((id): id is string => !!id);
-
-      for (const socketInRoom of socketsInRoom) {
-        socketInRoom.leave(targetRoomId);
-      }
-      io.in(targetRoomId).disconnectSockets(true);
-
-      const redis = getRedis();
-      if (redis && isRedisAvailable()) {
-        try {
-          await redis.del(`room:${targetRoomId}:users`);
-          for (const uid of userIdsToClean) {
-            await redis.del(`user:${uid}`);
-          }
-          logger.info(`Cleaned up Redis data for room ${targetRoomId}`);
-        } catch (redisError: any) {
-          logger.warn('Redis cleanup failed (non-critical)', {
-            error: redisError instanceof Error ? redisError.message : String(redisError),
-          });
-        }
-      }
-
-      logger.info(`Room ${targetRoomId} terminated successfully by admin ${user.userId}. Disconnected ${socketsInRoom.length} sockets.`);
+      logger.info(`Room ${targetRoomId} terminated successfully by admin ${user.userId}. Disconnected ${purgeResult.socketsDisconnected} sockets.`);
 
       emitAdminInsightUpdate(io, 'room_vanished', { roomCode: targetRoomId }).catch(err => {
         logger.warn('Failed to emit admin insight update for room vanished', {
@@ -665,33 +553,15 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         throw new Error('Database connection not available');
       }
 
-      const messageDeleteResult = await MessageModel.deleteMany({ roomCode: targetRoomId });
-      logger.info(`Deleted ${messageDeleteResult.deletedCount} messages from room ${targetRoomId}`);
-
-      const roomDeleteResult = await RoomModel.deleteOne({ code: targetRoomId });
-      logger.info(`Deleted room ${targetRoomId}`, { deleted: roomDeleteResult.deletedCount });
-
-      clearAllRoomState(targetRoomId);
-
-      io.to(targetRoomId).emit('room_destroyed', {
+      // Previously this path deleted only messages + the room document: no
+      // file deletion at all, and Redis cleanup limited to the member set.
+      // Routing it through purgeRoom is what closes that gap.
+      await purgeRoom(targetRoomId, {
         reason: 'Host ended the meeting',
-        roomId: targetRoomId,
-        destroyedBy: user.userId,
+        trigger: 'owner',
+        event: 'room_destroyed',
+        actorId: user.userId,
       });
-
-      io.in(targetRoomId).disconnectSockets(true);
-
-      const redis = getRedis();
-      if (redis && isRedisAvailable()) {
-        try {
-          await redis.del(`room:${targetRoomId}:users`);
-          logger.info(`Cleaned up Redis data for room ${targetRoomId}`);
-        } catch (redisError: any) {
-          logger.warn('Redis cleanup failed (non-critical)', {
-            error: redisError instanceof Error ? redisError.message : String(redisError),
-          });
-        }
-      }
 
       logger.info(`Room ${targetRoomId} destroyed successfully by admin ${user.userId}`);
       user.roomCode = '';
@@ -755,79 +625,24 @@ export const registerRoomLifecycleHandlers = (ctx: HandlerContext): void => {
         throw new Error('Database connection not available');
       }
 
-      let cleanupResult: any;
-      let useTransaction = false;
-
-      try {
-        const session = await mongoose.startSession();
-        try {
-          await session.withTransaction(async () => {
-            const messageDeleteResult = await MessageModel.deleteMany({ roomCode: targetRoomId }, { session });
-            logger.info(`Deleted ${messageDeleteResult.deletedCount} messages from room ${targetRoomId}`);
-
-            const roomDeleteResult = await RoomModel.deleteOne({ code: targetRoomId }, { session });
-            logger.info(`Deleted room ${targetRoomId}`, { deleted: roomDeleteResult.deletedCount });
-
-            cleanupResult = {
-              messagesDeleted: messageDeleteResult.deletedCount,
-              roomDeleted: roomDeleteResult.deletedCount,
-            };
-          });
-          useTransaction = true;
-        } catch (transactionError: any) {
-          logger.warn('Transaction failed, will use direct deletes', {
-            error: transactionError instanceof Error ? transactionError.message : String(transactionError),
-          });
-        } finally {
-          await session.endSession();
-        }
-      } catch (sessionError: any) {
-        logger.info('Cannot start session (likely not a replica set), using direct deletes', {
-          error: sessionError instanceof Error ? sessionError.message : String(sessionError),
-        });
-      }
-
-      if (!useTransaction) {
-        logger.info('Using direct deletes (no transaction)');
-        const messageDeleteResult = await MessageModel.deleteMany({ roomCode: targetRoomId });
-        const roomDeleteResult = await RoomModel.deleteOne({ code: targetRoomId });
-        cleanupResult = {
-          messagesDeleted: messageDeleteResult.deletedCount,
-          roomDeleted: roomDeleteResult.deletedCount,
-        };
-      }
-
-      const redis = getRedis();
-      if (redis && isRedisAvailable()) {
-        try {
-          await redis.del(`room:${targetRoomId}:users`);
-          const socketsInRoom = await io.in(targetRoomId).fetchSockets();
-          for (const socketInRoom of socketsInRoom) {
-            const socketUser = (socketInRoom as any).data?.user;
-            if (socketUser?.userId) await redis.del(`user:${socketUser.userId}`);
-          }
-          logger.info(`Cleaned up Redis data for room ${targetRoomId}`);
-        } catch (redisError: any) {
-          logger.warn('Redis cleanup failed (non-critical)', {
-            error: redisError instanceof Error ? redisError.message : String(redisError),
-          });
-        }
-      }
-
-      clearAllRoomState(targetRoomId);
-
-      io.to(targetRoomId).emit('room_terminated', {
+      // The old transaction-with-fallback here only ever wrapped the two Mongo
+      // deletes, so it bought atomicity across the two cheapest steps while
+      // files, Redis and in-memory state stayed outside it anyway — and this
+      // path deleted no files at all and never force-disconnected anyone.
+      const cleanupResult = await purgeRoom(targetRoomId, {
         reason: 'Host ended the session',
-        roomId: targetRoomId,
-        terminatedBy: user.userId,
+        trigger: 'owner',
+        event: 'room_terminated',
+        actorId: user.userId,
       });
 
-      const socketsInRoom = await io.in(targetRoomId).fetchSockets();
-      for (const socketInRoom of socketsInRoom) {
-        socketInRoom.leave(targetRoomId);
-      }
-
-      logger.info(`Room ${targetRoomId} closed successfully by admin ${user.userId}. Disconnected ${socketsInRoom.length} sockets.`, cleanupResult);
+      logger.info(
+        `Room ${targetRoomId} closed successfully by admin ${user.userId}. Disconnected ${cleanupResult.socketsDisconnected} sockets.`,
+        {
+          messagesDeleted: cleanupResult.messagesDeleted,
+          roomDeleted: cleanupResult.roomDeleted,
+        },
+      );
 
       user.roomCode = '';
     } catch (error: any) {

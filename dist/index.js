@@ -6,7 +6,6 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 import { connectDatabase } from './config/database.js';
 import { closeRedis } from './config/redis.js';
 import { handleSocketConnection } from './socket/handlers.js';
@@ -29,11 +28,14 @@ import adminDonationRoutes from './routes/adminDonationRoutes.js';
 import adminUserRoutes from './routes/adminUserRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { authenticateAdmin } from './middleware/adminAuth.js';
-import { startCleanupJob } from './services/cleanupService.js';
+import { rateLimiter } from './middleware/rateLimiter.js';
+import { startCleanupJob, runCleanupTick } from './services/cleanupService.js';
 import { primeSettingsCache } from './services/adminSettingsService.js';
 import { logger } from './utils/logger.js';
 import { env } from './config/env.js';
 import { isRateLimitExempt } from './utils/rateLimitExempt.js';
+import { recordApiRequest } from './services/metricsService.js';
+import adminMonitoringRoutes from './routes/adminMonitoringRoutes.js';
 const PORT = parseInt(process.env.PORT || '8080', 10);
 // CORS origin configuration - locked down to specific frontend URL
 const getCorsOrigin = () => {
@@ -100,6 +102,12 @@ const io = new Server(httpServer, {
 // Export io instance for use in other modules
 import { setIoInstance } from './socket/ioInstance.js';
 setIoInstance(io);
+// Per-room in-memory state (caches, moderation lists, screen-share, metrics
+// labels) lives in this process only. When one instance purges a room, the
+// others have no other way to learn it is gone, so the purge fans out over the
+// Redis adapter and every instance clears its own copy here.
+import { registerPurgeFanoutHandler } from './services/roomPurgeService.js';
+registerPurgeFanoutHandler(io);
 // CORS configuration
 app.use(cors({
     origin: corsOrigin,
@@ -109,46 +117,27 @@ app.use(cors({
 }));
 // Security headers (hides "Powered by Express" and adds security headers)
 app.use(helmet());
-// Global rate limiter (for general routes)
-// Allow 100 requests per 15 minutes per IP
-const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100,
-    message: { error: "Too many requests from this IP, please try again later." },
-    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-    skip: (req) => isRateLimitExempt(req),
-});
 if (isRateLimitExempt()) {
     logger.info('Rate limiting disabled for local development');
 }
-// Apply global limiter to all API routes
-app.use('/api', globalLimiter);
+// Global rate limiter (100 requests per 15 minutes per IP), applied to all API
+// routes. Redis-backed (see middleware/rateLimiter.ts) — Cloud Run can run
+// multiple instances at once, and an in-memory store only limits per instance,
+// so a client could get up to N× the intended limit by fanning requests
+// across instances. Fails open (allows the request) if Redis is unavailable.
+app.use('/api', rateLimiter('apiGlobal'));
+// Request/error-rate counters for the Server Monitoring dashboard. Labeled
+// only by status class (2xx/3xx/4xx/5xx), never by path, to avoid unbounded
+// cardinality — see metricsService.ts's recordApiRequest.
+app.use('/api', (req, res, next) => {
+    res.on('finish', () => recordApiRequest(res.statusCode));
+    next();
+});
 // Strict rate limiter — room creation only (low limit, prevents mass room spam)
 // 10 room creations per hour per IP
-const roomCreationLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 10,
-    message: { error: "You are doing that too much. Chill for a bit." },
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => isRateLimitExempt(req),
-});
-// File upload rate limiter — more lenient, normal chat usage sends many files
-// 100 upload URL requests per 15 minutes per IP
-const uploadLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100,
-    message: { error: "Too many file uploads. Please slow down." },
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => isRateLimitExempt(req),
-});
-// Apply limits to specific heavy routes
-// Room creation (POST /api/rooms)
-app.post('/api/rooms', roomCreationLimiter);
-// File upload URL generation
-app.use('/api/files/get-upload-url', uploadLimiter);
+app.post('/api/rooms', rateLimiter('roomCreationHourly'));
+// File upload URL generation — more lenient, normal chat usage sends many files
+app.use('/api/files/get-upload-url', rateLimiter('uploadUrlGlobal'));
 // Body parser with size limits
 app.use(cookieParser());
 app.use(express.json({
@@ -326,20 +315,13 @@ app.use('/api/billing-admin', adminBillingRoutes);
 app.use('/api/donations', donationRoutes);
 app.use('/api/donations-admin', adminDonationRoutes);
 app.use('/api/rbac-users', adminUserRoutes);
+app.use('/api/monitoring-admin', adminMonitoringRoutes);
 app.use('/api/plans', planRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/credits', creditRoutes);
 app.use('/api/files', fileRoutes);
 // Link preview (OG cards) with rate limit
-const linkPreviewLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 30,
-    message: { error: 'Too many link preview requests. Please slow down.' },
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => isRateLimitExempt(req),
-});
-app.use('/api/link-preview', linkPreviewLimiter, linkPreviewRoutes);
+app.use('/api/link-preview', rateLimiter('linkPreview'), linkPreviewRoutes);
 app.use(errorHandler);
 io.on('connection', async (socket) => {
     logger.debug('Socket connected', { socketId: socket.id });
@@ -352,6 +334,12 @@ io.on('connection', async (socket) => {
         }
         else {
             logger.warn('Rejected admin socket: invalid secret', { socketId: socket.id });
+            const { recordSecurityEvent } = await import('./services/serverMonitoringService.js');
+            void recordSecurityEvent({
+                ip: socket.handshake.address || 'unknown',
+                type: 'admin_socket_auth_fail',
+                userAgent: socket.handshake.headers['user-agent'],
+            });
             socket.emit('error', { message: 'Unauthorized admin connection' });
             socket.disconnect(true);
         }
@@ -363,6 +351,7 @@ let cleanupJobInterval = null;
 let autoVanishInterval = null;
 let subscriptionExpiryInterval = null;
 let metricsLogInterval = null;
+let monitoringSnapshotInterval = null;
 let adapterPubClient = null;
 let adapterSubClient = null;
 let socketIoAdapterStatus = 'memory';
@@ -505,44 +494,63 @@ const startServer = () => {
             error: error instanceof Error ? error.message : String(error),
         });
     }
-    // Start cleanup job (non-blocking)
-    try {
-        cleanupJobInterval = startCleanupJob();
-    }
-    catch (error) {
-        logger.error('Failed to start cleanup job', {
-            error: error instanceof Error ? error.message : String(error)
-        });
-        // Don't exit - server can still run
-    }
-    // Start auto-vanish worker (non-blocking)
-    (async () => {
+    // In-process cleanup/auto-vanish/subscription-expiry timers. Disable via
+    // ENABLE_IN_PROCESS_TIMERS=false once these are driven externally instead
+    // (Cloud Scheduler -> POST /api/admin/maintenance/run) — a bare setInterval
+    // can stall for hours on a scale-to-zero instance with no inbound requests,
+    // so an external, request-shaped trigger is what actually makes these jobs
+    // reliable on Cloud Run, independent of the always-on-CPU cost question.
+    if (env.ENABLE_IN_PROCESS_TIMERS) {
+        // Start cleanup job (non-blocking)
         try {
-            const { startAutoVanishWorker } = await import('./services/autoVanishService.js');
-            autoVanishInterval = startAutoVanishWorker();
-            logger.info('Auto-vanish worker started');
+            cleanupJobInterval = startCleanupJob();
         }
         catch (error) {
-            logger.error('Failed to start auto-vanish worker', {
+            logger.error('Failed to start cleanup job', {
                 error: error instanceof Error ? error.message : String(error)
             });
             // Don't exit - server can still run
         }
-    })();
-    // Start subscription-expiry worker (non-blocking)
-    (async () => {
-        try {
-            const { startSubscriptionExpiryWorker } = await import('./services/subscriptionExpiryService.js');
-            subscriptionExpiryInterval = startSubscriptionExpiryWorker();
-            logger.info('Subscription expiry worker started');
-        }
-        catch (error) {
-            logger.error('Failed to start subscription expiry worker', {
-                error: error instanceof Error ? error.message : String(error)
-            });
-            // Don't exit - server can still run
-        }
-    })();
+        // Start auto-vanish worker (non-blocking)
+        (async () => {
+            try {
+                const { startAutoVanishWorker } = await import('./services/autoVanishService.js');
+                autoVanishInterval = startAutoVanishWorker();
+                logger.info('Auto-vanish worker started');
+            }
+            catch (error) {
+                logger.error('Failed to start auto-vanish worker', {
+                    error: error instanceof Error ? error.message : String(error)
+                });
+                // Don't exit - server can still run
+            }
+        })();
+        // Start subscription-expiry worker (non-blocking)
+        (async () => {
+            try {
+                const { startSubscriptionExpiryWorker } = await import('./services/subscriptionExpiryService.js');
+                subscriptionExpiryInterval = startSubscriptionExpiryWorker();
+                logger.info('Subscription expiry worker started');
+            }
+            catch (error) {
+                logger.error('Failed to start subscription expiry worker', {
+                    error: error instanceof Error ? error.message : String(error)
+                });
+                // Don't exit - server can still run
+            }
+        })();
+    }
+    else {
+        logger.info('In-process maintenance timers disabled (ENABLE_IN_PROCESS_TIMERS=false) — expecting an external trigger against POST /api/admin/maintenance/run');
+        // Still run once at boot so a fresh instance isn't left dirty until the
+        // first external trigger arrives.
+        runCleanupTick().catch(() => { });
+        (async () => {
+            const { recoverStuckRooms, processAutoVanish: runAutoVanishOnce } = await import('./services/autoVanishService.js');
+            recoverStuckRooms().catch(() => { });
+            runAutoVanishOnce().catch(() => { });
+        })();
+    }
     // Periodic metrics summary in Cloud Logging, independent of whether a
     // Prometheus scraper is configured against /metrics.
     (async () => {
@@ -552,6 +560,21 @@ const startServer = () => {
         }
         catch (error) {
             logger.error('Failed to start metrics logging', {
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    })();
+    // Server Monitoring: 60s snapshot tick feeding the admin dashboard's
+    // history/alerts (see serverMonitoringService.ts). Always-on, not gated by
+    // admin presence — cheap (in-memory reads + one Redis round trip), and
+    // history should exist the moment an admin opens the tab.
+    (async () => {
+        try {
+            const { startMonitoringSnapshotJob } = await import('./services/serverMonitoringService.js');
+            monitoringSnapshotInterval = startMonitoringSnapshotJob(io, getSocketIoAdapterStatus);
+        }
+        catch (error) {
+            logger.error('Failed to start monitoring snapshot job', {
                 error: error instanceof Error ? error.message : String(error)
             });
         }
@@ -577,6 +600,9 @@ const shutdown = async (signal) => {
     }
     if (metricsLogInterval) {
         clearInterval(metricsLogInterval);
+    }
+    if (monitoringSnapshotInterval) {
+        clearInterval(monitoringSnapshotInterval);
     }
     try {
         await closeRedis();

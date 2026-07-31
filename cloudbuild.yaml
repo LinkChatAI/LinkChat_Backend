@@ -1,6 +1,5 @@
 steps:
   # Build the container image
-  # Use BUILD_ID which is always available (falls back to latest if needed)
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
@@ -23,10 +22,17 @@ steps:
       - 'gcr.io/$PROJECT_ID/linkchat-backend:latest'
 
   # Deploy container image to Cloud Run.
-  # NOTE: the live production service is `linkroom-backend` in asia-south1
-  # (project linkchat-480712) — the service Netlify proxies to. This file
-  # previously deployed a `linkchat-backend` service in us-central1 that does
-  # not exist in production, so none of these settings ever reached prod.
+  # This is the ONE canonical deploy config for `linkroom-backend` (asia-south1,
+  # project linkchat-480712) — the service Netlify proxies to. `cloudbuild-simple.yaml`
+  # and `cloudbuild-minimal.yaml` have been deleted; they had each drifted to
+  # different flag values (memory, min/max-instances, concurrency,
+  # --no-cpu-throttling) and none of the three matched what was actually
+  # deployed. These flags were reconciled 2026-07-24 directly against
+  # `gcloud run services describe linkroom-backend --region asia-south1`.
+  #
+  # If you change a flag here: deploy it, then re-run that `describe` command
+  # to confirm the live service matches this file. Letting them drift apart
+  # again is exactly the bug an audit had to find and fix once already.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -43,39 +49,43 @@ steps:
       - '--port'
       - '8080'
       - '--memory'
-      - '512Mi'
+      - '256Mi'
       - '--cpu'
       - '1'
-      # Keep one instance warm so an active WebSocket's instance is never scaled
-      # to zero (which would kill the connection and drop the Socket.IO session).
+      # Scale-to-zero is fine for the REST-API side of this service. The real
+      # cost driver identified by the audit is that an open Socket.IO
+      # connection is billed as continuously-active CPU for as long as it
+      # stays connected — a property of running WebSockets on Cloud Run at
+      # all, not of min-instances. Bumping this back to 1 buys a guaranteed-
+      # warm instance at the (much cheaper) idle rate, but does not change how
+      # a live socket is billed. If cold-start session drops become a problem,
+      # that's a signal to move the realtime gateway off Cloud Run entirely
+      # (see the cost audit's proposed architecture), not to raise this.
       - '--min-instances'
-      - '1'
+      - '0'
       - '--max-instances'
-      - '10'
-      # A WebSocket is a single long-lived HTTP request; Cloud Run's request
+      - '3'
+      # A WebSocket is one long-lived HTTP request; Cloud Run's request
       # timeout applies to it. 300s force-closed every socket after 5 minutes.
-      # 3600s (the Cloud Run max) lets connections live an hour before a refresh.
+      # 3600s (the Cloud Run max) lets a connection live an hour before a
+      # client-side reconnect.
       - '--timeout'
       - '3600'
-      # Each open WebSocket occupies one concurrency slot for its lifetime. At
-      # the default 80, ~400 connected users would spin up 5 instances, each
-      # billing active CPU. 250 lets one 512Mi instance hold several hundred
-      # mostly-idle sockets before scaling out.
       - '--concurrency'
-      - '250'
-      # Best-effort sticky sessions. Harmless with websocket-only, but protects
-      # any polling handshake that still occurs (e.g. a dev client hitting prod).
+      - '100'
+      # Doubles allocated CPU only during container startup (faster cold
+      # starts at min-instances=0) — does not apply during steady-state
+      # request handling, so it doesn't reintroduce the always-on-CPU cost
+      # problem.
+      - '--cpu-boost'
       - '--session-affinity'
       # --update-env-vars MERGES with whatever's already set on the service
       # (MONGO_URI, REDIS_URL, JWT_SECRET, GOOGLE_CLIENT_*, ADMIN_SECRET,
       # GCS_*, etc. — all configured directly on Cloud Run, not tracked here).
-      # --set-env-vars REPLACES the entire env var list with exactly what's
-      # given here — a prior version of this file used --set-env-vars with
-      # only NODE_ENV=production listed, which silently wiped every other env
-      # var on deploy and took production down (MongoDB/Redis both
-      # unreachable) the moment the PORT-reserved-var bug above was fixed and
-      # this step could finally run to completion. Never use --set-env-vars
-      # here unless you intend to fully replace the service's env vars.
+      # NEVER use --set-env-vars here — an earlier version of this file used
+      # --set-env-vars with only NODE_ENV=production listed, which silently
+      # wiped every other env var on deploy and took production down
+      # (MongoDB/Redis both unreachable).
       - '--update-env-vars'
       - 'NODE_ENV=production'
 
@@ -85,5 +95,3 @@ images:
 
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_HIGHCPU_8'
-

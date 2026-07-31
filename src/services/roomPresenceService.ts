@@ -75,3 +75,54 @@ export const getLiveUserCountsForRooms = async (
 /** Sum of live counts across a set of room codes — for "users in active/locked/auto-vanish rooms". */
 export const sumLiveUserCounts = (counts: Map<string, number>, roomCodes: string[]): number =>
   roomCodes.reduce((total, code) => total + (counts.get(code) || 0), 0);
+
+/**
+ * Platform-wide count of unique real users currently connected to any room,
+ * across every Cloud Run instance. The single correct source for admin
+ * dashboard "users online" stats — do not recompute this from
+ * `io.sockets.sockets.size` / `io.engine.clientsCount` elsewhere:
+ *
+ *  - Ghost Mode admins are excluded for free — they're never added to a
+ *    `room:{code}:users` set (see joinHandlers.ts), so no separate filtering
+ *    is needed.
+ *  - Deduped by userId, not by socket — a user with two tabs open still
+ *    counts once.
+ *  - Cross-instance accurate via Redis, unlike `io.sockets`/`io.engine`,
+ *    which only reflect connections to whichever single instance handled
+ *    the request.
+ *  - Also excludes the admin dashboard's own socket connections (they join
+ *    an admin room, never a `room:{code}:users` set).
+ *
+ * Uses a non-blocking SCAN (not KEYS, which blocks Redis's single-threaded
+ * event loop for every other caller — including the join/leave hot path —
+ * for the duration of the scan) plus a pipelined SMEMBERS batch.
+ */
+export const getPlatformUsersOnline = async (): Promise<number> => {
+  const redis = getRedis();
+  if (!redis || !isRedisAvailable()) return 0;
+
+  try {
+    const keys: string[] = [];
+    const stream = redis.scanStream({ match: 'room:*:users', count: 100 });
+    for await (const chunk of stream as AsyncIterable<string[]>) {
+      keys.push(...chunk);
+    }
+    if (keys.length === 0) return 0;
+
+    const pipeline = redis.pipeline();
+    keys.forEach((key) => pipeline.smembers(key));
+    const results = await pipeline.exec();
+
+    const userIds = new Set<string>();
+    results?.forEach((result: [Error | null, unknown]) => {
+      const [, members] = result;
+      (members as string[] | undefined)?.forEach((userId) => userIds.add(userId));
+    });
+    return userIds.size;
+  } catch (error: unknown) {
+    logger.warn('getPlatformUsersOnline: Redis scan failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
+  }
+};

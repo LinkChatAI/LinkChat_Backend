@@ -27,7 +27,10 @@ router.post('/:code/pairing/generate', rateLimiter('default'), generatePairingCo
 router.post('/pairing/validate', rateLimiter('default'), validatePairingCodeHandler);
 router.post('/:code/end', rateLimiter('default'), authenticateRoom, endRoomHandler);
 router.post('/:code/leave', rateLimiter('default'), leaveRoomHandler);
-router.delete('/:code', rateLimiter('default'), deleteRoomHandler);
+// authenticateRoom is mandatory here. This route previously had no auth at
+// all: with patterned 4-digit codes the keyspace is 370 values, so anyone
+// could enumerate it and permanently destroy every live room on the platform.
+router.delete('/:code', rateLimiter('default'), authenticateRoom, deleteRoomHandler);
 router.get('/:code/messages', rateLimiter('getRoom'), getMessagesHandler);
 
 export default router;

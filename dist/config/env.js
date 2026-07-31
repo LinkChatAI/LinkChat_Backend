@@ -85,6 +85,7 @@ const validateEnv = () => {
         // incomplete (see prior GOOGLE_CLIENT_ID config-drift incident); still
         // overridable via env var to add/remove Super Admins without a redeploy.
         GHOST_MODE_ADMIN_EMAILS: process.env.GHOST_MODE_ADMIN_EMAILS || 'wordtheme44@gmail.com,m87.krishna@gmail.com',
+        ENABLE_IN_PROCESS_TIMERS: process.env.ENABLE_IN_PROCESS_TIMERS !== 'false',
     };
 };
 export const env = validateEnv();

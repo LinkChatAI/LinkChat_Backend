@@ -6,6 +6,13 @@ import { getRoomMessages } from '../../services/messageService.js';
 import { SocketUser } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
 import { sanitizeName } from '../../utils/sanitize.js';
+import {
+  generateUniqueNicknameForRoom,
+  isValidNicknameFormat,
+  NICKNAME_FORMAT_ERROR,
+  NICKNAME_MAX_LENGTH,
+  shuffleNicknamePool,
+} from '../../utils/nickname.js';
 import { emitAdminInsightUpdate } from '../adminHandlers.js';
 import { HandlerContext, stripHeavyContentForJoin } from './types.js';
 import { clearPendingDeletionTimer, hasPendingDeletion, clearPendingUserLeaveTimer } from './roomLifecycleHandlers.js';
@@ -61,6 +68,25 @@ const waitForDatabase = async (maxRetries = 10, delayMs = 1000): Promise<boolean
 };
 
 /**
+ * TTL for a room's Redis keys: the room's remaining lifetime plus a generous
+ * margin, so the keys always outlive legitimate use but can never outlive the
+ * room indefinitely. Clamped at both ends — an already-expired or absurdly
+ * long-lived room (admin "extend" allows up to 720h) must still yield a sane,
+ * bounded TTL.
+ */
+const REDIS_KEY_TTL_MARGIN_S = 6 * 60 * 60; // 6h past room expiry
+const REDIS_KEY_TTL_MIN_S = 60 * 60; // 1h
+const REDIS_KEY_TTL_MAX_S = 48 * 60 * 60; // 2 days
+
+const redisKeyTtlSeconds = (expiresAt?: Date | string): number => {
+  const expiryMs = expiresAt ? new Date(expiresAt).getTime() : NaN;
+  if (!Number.isFinite(expiryMs)) return REDIS_KEY_TTL_MAX_S;
+
+  const remainingS = Math.floor((expiryMs - Date.now()) / 1000) + REDIS_KEY_TTL_MARGIN_S;
+  return Math.min(REDIS_KEY_TTL_MAX_S, Math.max(REDIS_KEY_TTL_MIN_S, remainingS));
+};
+
+/**
  * Expensive, multi-source reconstruction of nicknames already in use in a room
  * (live sockets + message history). Only needed when Redis is unavailable —
  * when Redis is up, the atomic `room:{code}:nicknames` SADD in `tryReserve`
@@ -109,74 +135,152 @@ const buildExistingNicknamesFallback = async (
   return existingNicknames;
 };
 
-const ensureNicknameUniqueInRoom = async (
+/**
+ * Atomically attempt to reserve `candidate` in the room's nickname set.
+ * Returns true if it was free and is now reserved by the caller, false if
+ * someone else already holds it. When Redis is unavailable, falls back to a
+ * best-effort (non-atomic) check against live sockets + message history.
+ */
+const reserveNicknameInRoom = async (
+  candidate: string,
+  roomCode: string,
+  excludeUserId: string,
+  io: Server,
+): Promise<boolean> => {
+  const redis = getRedis();
+  if (redis && isRedisAvailable()) {
+    try {
+      const added = await redis.sadd(`room:${roomCode}:nicknames`, candidate.toLowerCase());
+      if (added === 1) {
+        // Successfully reserved — set TTL to 6 hours
+        redis.expire(`room:${roomCode}:nicknames`, 21600).catch(() => {});
+        return true;
+      }
+      // Already reserved by someone — but if it's this same user's own
+      // existing nickname (a reconnect/refresh resending the nickname they
+      // already hold), that's not a real conflict, just a redundant SADD.
+      if (excludeUserId) {
+        const currentNickname = await redis.hget(`user:${excludeUserId}`, 'nickname');
+        if (currentNickname && currentNickname.toLowerCase() === candidate.toLowerCase()) {
+          return true;
+        }
+      }
+      return false; // Someone else already holds it
+    } catch {
+      // Redis unavailable — fall back to best-effort check below
+    }
+  }
+  const existingNicknames = await buildExistingNicknamesFallback(roomCode, excludeUserId, io);
+  return !existingNicknames.has(candidate.toLowerCase());
+};
+
+/**
+ * Release a nickname reservation (e.g. a user changed their nickname, or
+ * left the room) so it becomes available to others again.
+ */
+const releaseNicknameInRoom = async (roomCode: string, nickname: string): Promise<void> => {
+  const redis = getRedis();
+  if (redis && isRedisAvailable()) {
+    try {
+      await redis.srem(`room:${roomCode}:nicknames`, nickname.toLowerCase());
+    } catch (error: any) {
+      logger.warn('Failed to release nickname reservation', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+};
+
+/**
+ * Append a numeric suffix (no separator, so the result stays a single
+ * alphanumeric token) until a free candidate is found, truncating the base
+ * as needed to respect NICKNAME_MAX_LENGTH. Last-resort uniqueness fallback.
+ */
+const reserveWithNumericSuffix = async (
   baseNickname: string,
   roomCode: string,
   excludeUserId: string,
   io: Server,
 ): Promise<string> => {
-  const redis = getRedis();
-  const redisReady = !!redis && isRedisAvailable();
-
-  // When Redis is up, skip the fetchSockets()/Redis-hget-loop/Mongo-distinct
-  // reconstruction entirely — `tryReserve` below atomically SADDs into
-  // `room:{code}:nicknames`, which is already the authoritative record of every
-  // nickname reserved in this room, so a collision surfaces for free via SADD's
-  // return value instead of needing a per-join O(N) pre-check.
-  const existingNicknames = redisReady
-    ? new Set<string>()
-    : await buildExistingNicknamesFallback(roomCode, excludeUserId, io);
-
-  const baseLower = baseNickname.toLowerCase();
-
-  const tryReserve = async (candidate: string): Promise<string | null> => {
-    // Atomic Redis reservation — prevents concurrent-join race where two users
-    // both read the same nickname set before either has written their choice.
-    const redis = getRedis();
-    if (redis && isRedisAvailable()) {
-      try {
-        const added = await redis.sadd(`room:${roomCode}:nicknames`, candidate.toLowerCase());
-        if (added === 1) {
-          // Successfully reserved — set TTL to 6 hours
-          redis.expire(`room:${roomCode}:nicknames`, 21600).catch(() => {});
-          return candidate;
-        }
-        return null; // Someone else took it concurrently
-      } catch {
-        // Redis unavailable — fall back to in-memory check only
-      }
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const suffix = Math.floor(Math.random() * 1000).toString();
+    const truncatedBase = baseNickname.slice(0, Math.max(1, NICKNAME_MAX_LENGTH - suffix.length));
+    const candidate = `${truncatedBase}${suffix}`;
+    if (await reserveNicknameInRoom(candidate, roomCode, excludeUserId, io)) {
+      return candidate;
     }
-    return existingNicknames.has(candidate.toLowerCase()) ? null : candidate;
-  };
+  }
+  const timestampSuffix = Date.now().toString().slice(-4);
+  return `${baseNickname.slice(0, Math.max(1, NICKNAME_MAX_LENGTH - timestampSuffix.length))}${timestampSuffix}`;
+};
 
-  if (!existingNicknames.has(baseLower)) {
-    const reserved = await tryReserve(baseNickname);
-    if (reserved) return reserved;
+/**
+ * Reserve a nickname the *system* generated (no exact spelling owed to the
+ * user). On conflict, walks a shuffled pool of fresh candidate names instead
+ * of mutating the original with a suffix — keeps every auto-generated
+ * nickname a clean, unisex, one-word name. Only falls back to a numeric
+ * suffix if the entire pool is exhausted (would require more concurrent
+ * participants than distinct fallback names).
+ */
+const ensureGeneratedNicknameUniqueInRoom = async (
+  baseNickname: string,
+  roomCode: string,
+  excludeUserId: string,
+  io: Server,
+): Promise<string> => {
+  if (await reserveNicknameInRoom(baseNickname, roomCode, excludeUserId, io)) {
+    return baseNickname;
   }
 
-  let attempts = 0;
-  const maxAttempts = 20;
-  while (attempts < maxAttempts) {
-    const suffix = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-    const candidate = `${baseNickname}#${suffix}`;
-    if (!existingNicknames.has(candidate.toLowerCase())) {
-      const reserved = await tryReserve(candidate);
-      if (reserved) {
-        logger.debug('Nickname conflict resolved with suffix', {
-          original: baseNickname, unique: reserved, roomCode, excludeUserId,
-        });
-        return reserved;
-      }
+  for (const candidate of shuffleNicknamePool()) {
+    if (candidate.toLowerCase() === baseNickname.toLowerCase()) continue;
+    if (await reserveNicknameInRoom(candidate, roomCode, excludeUserId, io)) {
+      logger.debug('Nickname conflict resolved with a fresh candidate name', {
+        original: baseNickname, unique: candidate, roomCode, excludeUserId,
+      });
+      return candidate;
     }
-    attempts++;
   }
 
-  const timestampSuffix = Date.now().toString().slice(-3);
-  const uniqueNickname = `${baseNickname}#${timestampSuffix}`;
-  logger.warn('Used timestamp suffix for nickname uniqueness after max attempts', {
-    original: baseNickname, unique: uniqueNickname, roomCode, attempts: maxAttempts,
+  logger.warn('Fallback name pool exhausted, using numeric suffix for uniqueness', {
+    original: baseNickname, roomCode,
   });
-  return uniqueNickname;
+  return reserveWithNumericSuffix(baseNickname, roomCode, excludeUserId, io);
+};
+
+/**
+ * Reserve a user-supplied nickname at join time. Unlike the edit flow, a
+ * taken nickname must never block the join — it falls back to a numeric
+ * suffix so the requester still gets in, just not blocked on a name clash
+ * with someone already in the room.
+ */
+const reserveCustomNicknameOrSuffix = async (
+  candidate: string,
+  roomCode: string,
+  excludeUserId: string,
+  io: Server,
+): Promise<string> => {
+  if (await reserveNicknameInRoom(candidate, roomCode, excludeUserId, io)) {
+    return candidate;
+  }
+  return reserveWithNumericSuffix(candidate, roomCode, excludeUserId, io);
+};
+
+/**
+ * Auto-generate a nickname for a user who didn't supply one (or whose
+ * supplied nickname failed format validation).
+ */
+const autoGenerateNickname = async (roomCode: string, userId: string, io: Server): Promise<string> => {
+  try {
+    const baseNickname = await generateUniqueNicknameForRoom(roomCode);
+    return await ensureGeneratedNicknameUniqueInRoom(baseNickname, roomCode, userId, io);
+  } catch (error: any) {
+    logger.warn('Failed to generate unique nickname, using Anonymous', {
+      error: error instanceof Error ? error.message : String(error),
+      roomCode,
+    });
+    return 'Anonymous';
+  }
 };
 
 export const registerJoinHandlers = (ctx: HandlerContext): void => {
@@ -302,26 +406,26 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         // participant-facing list, so it can never collide with (or take up)
         // a real nickname slot in the room.
         nickname = 'Ghost Admin';
-      } else if (data.nickname && typeof data.nickname === 'string' && data.nickname.trim()) {
-        const providedNickname = sanitizeName(data.nickname.trim());
-        nickname = await ensureNicknameUniqueInRoom(providedNickname, code, user.userId, io);
-        if (nickname !== providedNickname) {
-          logger.info('Provided nickname had conflict, appended suffix', {
-            original: providedNickname, unique: nickname, roomCode: code, userId: user.userId,
-          });
-        }
       } else {
-        try {
-          const { generateUniqueNicknameForRoom } = await import('../../utils/nickname.js');
-          const baseNickname = await generateUniqueNicknameForRoom(code);
-          nickname = await ensureNicknameUniqueInRoom(baseNickname, code, user.userId, io);
+        const providedNickname = data.nickname && typeof data.nickname === 'string' && data.nickname.trim()
+          ? sanitizeName(data.nickname.trim())
+          : '';
+
+        if (providedNickname && isValidNicknameFormat(providedNickname)) {
+          nickname = await reserveCustomNicknameOrSuffix(providedNickname, code, user.userId, io);
+          if (nickname !== providedNickname) {
+            logger.info('Provided nickname had conflict, appended suffix', {
+              original: providedNickname, unique: nickname, roomCode: code, userId: user.userId,
+            });
+          }
+        } else {
+          if (providedNickname) {
+            logger.info('Provided nickname failed format validation, auto-generating instead', {
+              provided: providedNickname, roomCode: code, userId: user.userId,
+            });
+          }
+          nickname = await autoGenerateNickname(code, user.userId, io);
           logger.debug('Generated unique nickname for room', { nickname, roomCode: code, userId: user.userId });
-        } catch (error: any) {
-          logger.warn('Failed to generate unique nickname, using Anonymous', {
-            error: error instanceof Error ? error.message : String(error),
-            roomCode: code,
-          });
-          nickname = 'Anonymous';
         }
       }
 
@@ -347,6 +451,16 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
             nickname: user.nickname,
             roomCode: code,
           });
+          // Safety net, not the primary reaper: purgeRoom deletes these keys
+          // explicitly. Without a TTL, a purge that never ran (instance killed
+          // mid-teardown, Redis unreachable at that moment) leaked both keys
+          // forever — and a leaked `room:*:users` set inflates the participant
+          // count of whatever room later inherits this recycled code. The
+          // window is anchored to the room's own expiry so it always outlives
+          // legitimate use.
+          const ttlSeconds = redisKeyTtlSeconds(room.expiresAt);
+          await redis.expire(`room:${code}:users`, ttlSeconds);
+          await redis.expire(`user:${user.userId}`, ttlSeconds);
         } catch (error: any) {
           // Ignore Redis errors
         }
@@ -527,21 +641,32 @@ export const registerJoinHandlers = (ctx: HandlerContext): void => {
         return;
       }
 
-      const newName = data.newName.trim();
-      if (newName.length < 3 || newName.length > 15) {
-        socket.emit('error_alert', { message: 'Nickname must be 3-15 characters' });
+      const newName = sanitizeName(data.newName.trim());
+
+      if (!isValidNicknameFormat(newName)) {
+        socket.emit('error_alert', { message: NICKNAME_FORMAT_ERROR });
         return;
       }
-
-      if (!/^[a-zA-Z0-9]+$/.test(newName)) {
-        socket.emit('error_alert', { message: 'Nickname must contain only letters and numbers' });
-        return;
-      }
-
-      const sanitizedNickname = sanitizeName(newName);
-      const uniqueNickname = await ensureNicknameUniqueInRoom(sanitizedNickname, user.roomCode, user.userId, io);
 
       const oldNickname = user.nickname;
+
+      if (newName.toLowerCase() === oldNickname.toLowerCase()) {
+        socket.emit('error_alert', { message: 'That is already your nickname' });
+        return;
+      }
+
+      // Unlike auto-generated nicknames, a name the user explicitly typed is
+      // never silently substituted on conflict — reject with a clear error so
+      // they can pick a different one, and leave their current nickname intact.
+      const reserved = await reserveNicknameInRoom(newName, user.roomCode, user.userId, io);
+      if (!reserved) {
+        socket.emit('error_alert', { message: 'That nickname is already taken. Please choose a different one.' });
+        return;
+      }
+
+      await releaseNicknameInRoom(user.roomCode, oldNickname);
+
+      const uniqueNickname = newName;
       user.nickname = uniqueNickname;
       user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(uniqueNickname)}&background=2563eb&color=fff`;
       (socket as any).data = { user };

@@ -12,6 +12,7 @@ import {
   generateLocalUploadUrl,
   markGcsUnavailable,
   probeGcsHealth,
+  getDownloadUrl,
 } from '../services/gcsService.js';
 import {
   recordUploadLocal,
@@ -284,8 +285,6 @@ export const downloadFileHandler = async (req: Request, res: Response): Promise<
       return;
     }
 
-    setAttachmentHeaders(res, fileName);
-
     const bucket = getBucket();
     const gcsHealthy = bucket ? await probeGcsHealth() : false;
 
@@ -297,23 +296,18 @@ export const downloadFileHandler = async (req: Request, res: Response): Promise<
         return;
       }
 
-      const [metadata] = await file.getMetadata();
-      if (metadata.contentType) {
-        res.setHeader('Content-Type', metadata.contentType);
-      }
-
-      file
-        .createReadStream()
-        .on('error', (err) => {
-          logger.error('GCS download stream error', {
-            error: err instanceof Error ? err.message : String(err),
-            storagePath,
-          });
-          if (!res.headersSent) res.status(500).json({ error: 'Failed to download file' });
-        })
-        .pipe(res);
+      // Redirect to a signed GCS URL instead of streaming the bytes through this
+      // instance. A proxied download (createReadStream().pipe(res)) held the
+      // Cloud Run instance's CPU/network open for the whole transfer — up to the
+      // 500MB video cap — which bills as active instance time either way and
+      // risks OOM/timeout on a 256Mi instance. GCS serves the redirect target
+      // directly and sets its own Content-Disposition: attachment header.
+      const signedUrl = await getDownloadUrl(storagePath, fileName);
+      res.redirect(302, signedUrl);
       return;
     }
+
+    setAttachmentHeaders(res, fileName);
 
     const fullPath = path.join(LOCAL_UPLOAD_DIR, storagePath);
     const normalizedPath = path.normalize(fullPath);
